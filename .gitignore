@@ -1,0 +1,7 @@
+node_modules/
+release/
+dist/
+fonts/
+pdfjs/
+katex.css
+icons/icon-*.png

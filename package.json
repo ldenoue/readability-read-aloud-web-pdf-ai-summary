@@ -1,0 +1,26 @@
+{
+  "name": "readability-read-aloud-extension",
+  "private": true,
+  "version": "0.23.0",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build.mjs",
+    "package": "npm run build && node scripts/package.mjs",
+    "package:chrome": "npm run build && node scripts/package.mjs chrome",
+    "package:firefox": "npm run build && node scripts/package.mjs firefox"
+  },
+  "dependencies": {
+    "@fontsource/inter": "^5.3.0",
+    "@huggingface/transformers": "^3.7.6",
+    "@mozilla/readability": "^0.6.0",
+    "katex": "^0.16.22",
+    "marked": "^18.0.7",
+    "onnxruntime-web": "1.27.0",
+    "pdfjs-dist": "^6.1.200",
+    "phonemizer": "1.2.1"
+  },
+  "devDependencies": {
+    "esbuild": "0.25.6",
+    "sharp": "^0.35.3"
+  }
+}

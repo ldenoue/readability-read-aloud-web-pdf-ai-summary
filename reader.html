@@ -1,0 +1,87 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Readability Reader</title>
+    <link rel="stylesheet" href="reader.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="#top"><span aria-hidden="true">◖</span> Readability Reader</a>
+      <div class="status" id="status" data-state="loading"><i></i><span>Preparing article…</span></div>
+    </header>
+
+    <main id="top">
+      <aside class="controls">
+        <div class="source-card">
+          <span>Source</span>
+          <a id="sourceLink" target="_blank" rel="noopener"></a>
+        </div>
+
+        <label class="field">TTS provider
+          <select id="provider">
+            <option value="pocket" selected>PocketTTS · higher quality</option>
+            <option value="inflect">Inflect · lighter</option>
+          </select>
+        </label>
+
+        <label class="field" id="inflectModelField" hidden>Inflect model
+          <select id="model">
+            <option value="micro" selected>Micro · better quality</option>
+            <option value="nano">Nano · lighter</option>
+          </select>
+        </label>
+
+        <label class="field" id="pocketVoiceField">PocketTTS voice
+          <select id="voice">
+            <option value="alba">Alba</option>
+            <option value="jean">Jean</option>
+            <option value="marius">Marius</option>
+            <option value="javert">Javert</option>
+            <option value="fantine">Fantine</option>
+            <option value="cosette">Cosette</option>
+            <option value="eponine">Éponine</option>
+            <option value="azelma" selected>Azelma</option>
+          </select>
+        </label>
+
+        <label class="field" id="speedField" hidden>Playback speed
+          <select id="speed">
+            <option value="1" selected>1×</option>
+            <option value="1.25">1.25×</option>
+            <option value="1.5">1.5×</option>
+            <option value="1.75">1.75×</option>
+            <option value="2">2×</option>
+          </select>
+        </label>
+
+        <div class="transport">
+          <button id="play" class="primary" type="button" disabled><i>▶</i><span>Read article</span></button>
+          <button id="stop" type="button" disabled>Stop</button>
+        </div>
+        <button id="clearCache" class="cache-button" type="button">Clear all cached models/voices</button>
+      </aside>
+
+      <div class="reading-column">
+        <section id="summaryPanel" class="summary-panel" aria-live="polite">
+          <span>Local AI Summary</span>
+          <div id="summaryLoading" class="summary-loading">
+            <div class="skeleton line"></div>
+            <div class="skeleton line"></div>
+            <div class="skeleton line short"></div>
+          </div>
+          <button id="summarize" class="secondary-button" type="button" hidden>Download &amp; summarize locally</button>
+          <p id="summaryText" hidden></p>
+        </section>
+        <article id="article" aria-live="polite">
+          <div class="skeleton title"></div>
+          <div class="skeleton line"></div>
+          <div class="skeleton line short"></div>
+        </article>
+      </div>
+    </main>
+
+    <script type="module" src="reader.js"></script>
+  </body>
+</html>
