@@ -87,4 +87,4 @@ Downloaded voices and model weights are cached persistently so they do not need 
 - [KaTeX](https://katex.org/) for formula rendering.
 - [Transformers.js](https://github.com/huggingface/transformers.js) and ONNX Runtime Web for local document models.
 - [Texo / FormulaNet](https://github.com/alephpi/Texo) for formula recognition (AGPL-3.0).
-- PocketTTS and Inflect for local speech synthesis.
+- [PocketTTS](https://github.com/kyutai-labs/pocket-tts), [Inflect Micro](https://huggingface.co/owensong/Inflect-Micro-v2-ONNX), and [Inflect Nano](https://huggingface.co/owensong/Inflect-Nano-v2-ONNX) for local speech synthesis.
