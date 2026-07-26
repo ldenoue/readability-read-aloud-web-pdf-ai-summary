@@ -8,6 +8,10 @@
   A private, local-first reader for articles and PDFs with AI summaries and natural text-to-speech.
 </p>
 
+<p align="center">
+  <strong><a href="https://chromewebstore.google.com/detail/gpgkihaonhnhfabcmgnmkjlmoegfkbne">Install Readability Reader from the Chrome Web Store</a></strong>
+</p>
+
 ![Readability Reader showing an extracted article, local AI summary, and text-to-speech controls](docs/readability-reader.png)
 
 ## What it does
