@@ -31,10 +31,12 @@ main { width:min(1160px,100%); margin:auto; display:grid; grid-template-columns:
 .controls { position:sticky; top:98px; align-self:start; display:grid; gap:20px; }
 .source-card { border-bottom:1px solid var(--line); padding-bottom:18px; }
 .source-heading { display:flex; align-items:center; justify-content:space-between; }
+.source-actions { display:flex; align-items:center; gap:6px; }
 .source-card span, .field { color:var(--muted); font-size:11px; font-weight:800; letter-spacing:.08em; text-transform:uppercase; }
 .source-card a { display:block; color:var(--blue); font-size:12px; font-weight:600; margin-top:5px; text-transform:none; letter-spacing:0; overflow:hidden; text-overflow:ellipsis; white-space:nowrap; }
-.source-heading button { width:27px; height:27px; padding:0; color:var(--muted); border:1px solid var(--line); border-radius:50%; background:var(--surface); font-size:17px; line-height:1; }
+.source-actions button { width:27px; height:27px; padding:0; color:var(--muted); border:1px solid var(--line); border-radius:50%; background:var(--surface); font-size:17px; line-height:1; }
 .source-heading button:hover { color:var(--blue); border-color:var(--blue); }
+.source-heading .delete-document:hover { color:var(--orange); border-color:var(--orange); }
 .field { display:grid; gap:7px; }
 select { width:100%; height:42px; color:var(--ink); border:1px solid var(--line); border-radius:9px; background:var(--surface); padding:0 10px; text-transform:none; letter-spacing:0; font-size:13px; font-weight:650; }
 #pdfFields { display:grid; gap:12px; padding:14px; border:1px solid var(--line); border-radius:11px; background:var(--panel); }
@@ -60,6 +62,7 @@ article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.
 .passage:hover { background:var(--hover); }
 .passage.heading { font-size:22px; line-height:1.25; font-weight:800; margin-top:32px; }
 .passage.pdf-text { margin-bottom:8px; padding-top:3px; padding-bottom:3px; font-size:16px; line-height:1.55; }
+.youtube-transcript .passage.paragraph { margin-bottom:8px; padding-top:3px; padding-bottom:3px; }
 .passage.pdf-text.heading { margin-top:32px; margin-bottom:20px; font-size:22px; line-height:1.25; font-weight:800; }
 .passage.pdf-text.pdf-title { font-size:clamp(32px,5vw,48px); line-height:1.08; letter-spacing:-.035em; }
 .passage.pdf-text.pdf-bold { font-weight:700; }

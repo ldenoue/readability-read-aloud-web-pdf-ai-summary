@@ -2,7 +2,7 @@ import { InflectTTS } from "./inflect-tts.js";
 import { PocketTTS } from "./pocket-tts.js";
 import { marked } from "./dist/marked.esm.js";
 import { renderMath } from "./dist/katex-render.js";
-import { embeddingTexts, getDocument, getDocumentByUrl, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
+import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
 import { embedTexts } from "./embedding-client.js";
 
 const $ = (selector) => document.querySelector(selector);
@@ -41,6 +41,7 @@ async function serializablePassages(passages) {
 async function persistDocument(input) {
   const saved = await saveDocument({ ...input, passages: await serializablePassages(input.passages) });
   activeDocumentId = saved.id;
+  $("#deleteDocument").hidden = false;
   history.replaceState(null, "", `reader.html?doc=${encodeURIComponent(saved.id)}`);
   setTimeout(() => { void indexSavedDocument(saved); }, 500);
   return saved;
@@ -420,13 +421,40 @@ function pdfMarkdownPassages(markdown, sourceUrl) {
   return htmlPassages(html, sourceUrl).map((passage) => ({ ...passage, pdfText: passage.type !== "image" }));
 }
 
+function likelyPdfTitleBlock(pages, maxPages = 3) {
+  const candidates = pages.flatMap((page) => (page.page <= maxPages ? (page.blocks || []).map((block) => ({ block, pageNumber: page.page })) : []))
+    .filter(({ block }) => {
+      const text = String(block.text || "").replace(/\s+/g, " ").trim();
+      return block.type === "text"
+        && block.isHorizontal !== false
+        && !block.isPageNumber
+        && !["Caption", "Footnote", "List-item"].includes(block.layoutLabel)
+        && Number.isFinite(block.fontSize)
+        && block.fontSize > 0
+        && text.length >= 8
+        && text.length <= 300;
+    });
+  return candidates.sort((left, right) => right.block.fontSize - left.block.fontSize
+    || left.pageNumber - right.pageNumber
+    || (left.block.layout?.y1 || 0) - (right.block.layout?.y1 || 0))[0]?.block || null;
+}
+
+function pdfTitleFromPages(pages) {
+  const block = likelyPdfTitleBlock(pages);
+  return block ? normalizePdfTypography(String(block.text || ""))
+    .replace(/-\n(?=\p{Ll})/gu, "")
+    .replace(/\s*\n\s*/g, " ")
+    .replace(/\s+/g, " ")
+    .trim() : "";
+}
+
 function pdfBlockPassages(pages) {
   const sizedBlocks = pages.flatMap((page) => page.blocks || [])
     .filter((block) => block.type === "text" && block.fontSize > 0)
     .sort((left, right) => left.fontSize - right.fontSize);
   const bodyFontSize = sizedBlocks[Math.floor(sizedBlocks.length / 2)]?.fontSize || 11;
-  const firstPage = pages.find((page) => page.page === 1);
-  const firstPageText = (firstPage?.blocks || []).filter((block) => {
+  const firstPage = pages.filter((page) => page.page === 1);
+  const firstPageText = (firstPage[0]?.blocks || []).filter((block) => {
     const text = String(block.text || "").replace(/\s+/g, " ").trim();
     const pageHeight = block.layout?.pageHeight || 0;
     return block.type === "text"
@@ -462,7 +490,7 @@ function pdfBlockPassages(pages) {
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
       const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
-        || (fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
+        || (block.layoutLabel === "Text" && fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
       passages.push({
         type: isHeading ? "heading" : "paragraph",
         text,
@@ -499,6 +527,28 @@ function mergePdfColumnContinuations(passages) {
     merged.push(passage);
   }
   return merged;
+}
+
+function removeRepeatedPdfMarginals(passages) {
+  const pagesByText = new Map();
+  const marginalKey = (passage) => {
+    if (!passage.pdfText || !Number.isInteger(passage.page) || !passage.layout) return "";
+    const { y1, y2, pageHeight } = passage.layout;
+    if (!(Number.isFinite(y1) && Number.isFinite(y2) && pageHeight > 0)) return "";
+    const inTopMargin = y2 <= pageHeight * 0.12;
+    const inBottomMargin = y1 >= pageHeight * 0.88;
+    if (!inTopMargin && !inBottomMargin) return "";
+    const text = passage.text.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+    return text.length >= 4 && text.length <= 240 ? `${inTopMargin ? "top" : "bottom"}:${text}` : "";
+  };
+  for (const passage of passages) {
+    const key = marginalKey(passage);
+    if (!key) continue;
+    if (!pagesByText.has(key)) pagesByText.set(key, new Set());
+    pagesByText.get(key).add(passage.page);
+  }
+  const repeated = new Set([...pagesByText].filter(([, pages]) => pages.size >= 2).map(([key]) => key));
+  return repeated.size ? passages.filter((passage) => !repeated.has(marginalKey(passage))) : passages;
 }
 
 const PDF_PREPOSED_DIACRITICS = new Map([
@@ -808,6 +858,8 @@ function hideCitationPreview(citation) {
 function render(metadata, passages, sourceUrl) {
   const article = $("#article");
   article.replaceChildren();
+  try { article.classList.toggle("youtube-transcript", /^(?:www\.|m\.)?youtube\.com$/i.test(new URL(sourceUrl).hostname)); }
+  catch { article.classList.remove("youtube-transcript"); }
   const title = metadata.title || passages.find((passage) => passage.type === "heading")?.text || new URL(sourceUrl).hostname;
   if (!metadata.hideTitle) {
     const heading = document.createElement("h1");
@@ -984,6 +1036,7 @@ async function loadArticle() {
     if (!saved) throw new Error("This locally saved document is no longer available.");
     await touchDocument(documentId);
     activeDocumentId = documentId;
+    $("#deleteDocument").hidden = false;
     state.language = saved.language || "";
     summaryLanguagePromise = null;
     state.passages = (saved.passages || []).map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
@@ -1019,7 +1072,7 @@ async function loadArticle() {
       setStatus({ state: "loading", message: `Rendered page ${page.page} of ${pageCount}` });
     });
     const metadata = {
-      title: "",
+      title: pdfTitleFromPages(extracted.pages || []) || filename,
       hideTitle: true,
       site: `${extracted.pageCount} pages`,
       displayTitle: filename,
@@ -1028,6 +1081,7 @@ async function loadArticle() {
       const rawPassages = extracted.format === "blocks" ? pdfBlockPassages(extracted.pages) : pdfMarkdownPassages(extracted.markdown, pdfUrl);
       state.passages = rawPassages.map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
     }
+    if (extracted.format === "blocks") state.passages = removeRepeatedPdfMarginals(state.passages);
     if (!state.passages.length) throw new Error("This PDF contains no extractable text. Scanned PDFs require OCR.");
     render(metadata, state.passages, pdfUrl);
     $("#play").disabled = false;
@@ -1060,7 +1114,7 @@ async function loadArticle() {
   render(metadata, state.passages, sourceUrl);
   $("#play").disabled = false;
   documentReady = true;
-  await persistDocument({ kind: "article", sourceUrl, metadata, passages: state.passages, language: state.language, summary: null });
+  await persistDocument({ kind: article.kind === "youtube" ? "youtube" : "article", sourceUrl, metadata, passages: state.passages, language: state.language, summary: null, videoId: article.videoId, duration: article.duration, chapters: article.chapters });
   void maybeSummarizeAutomatically();
   setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
 }
@@ -1071,6 +1125,21 @@ $("#reprocessPdf").addEventListener("click", () => {
   const sourceUrl = $("#sourceLink").href;
   if (!sourceUrl) return;
   location.href = `reader.html?pdf=${encodeURIComponent(sourceUrl)}&reprocess=1`;
+});
+$("#deleteDocument").addEventListener("click", async () => {
+  if (!activeDocumentId) return;
+  const label = $("#sourceLink").textContent.trim() || "this document";
+  if (!confirm(`Delete ${label} from your local library?`)) return;
+  const button = $("#deleteDocument");
+  button.disabled = true;
+  if (state.reading) stopReading();
+  try {
+    await removeDocument(activeDocumentId);
+    location.href = "library.html";
+  } catch (error) {
+    button.disabled = false;
+    setStatus({ state: "error", message: `Could not delete this document: ${error.message}` });
+  }
 });
 $("#summarize").addEventListener("click", () => {
   if (summaryStarted) return;

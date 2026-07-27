@@ -21,7 +21,10 @@
         <div class="source-card">
           <div class="source-heading">
             <span>Source</span>
-            <button id="reprocessPdf" type="button" title="Reprocess this PDF" aria-label="Reprocess this PDF" hidden>↻</button>
+            <div class="source-actions">
+              <button id="reprocessPdf" type="button" title="Reprocess this PDF" aria-label="Reprocess this PDF" hidden>↻</button>
+              <button id="deleteDocument" class="delete-document" type="button" title="Delete from local library" aria-label="Delete from local library" hidden>×</button>
+            </div>
           </div>
           <a id="sourceLink" target="_blank" rel="noopener"></a>
         </div>

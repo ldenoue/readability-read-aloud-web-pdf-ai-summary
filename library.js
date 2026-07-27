@@ -65,7 +65,7 @@ function render(savedDocuments, query = "") {
     let hostname = savedDocument.sourceUrl;
     try { hostname = new URL(savedDocument.sourceUrl).hostname || "Local file"; } catch {}
     meta.innerHTML = `<span class="kind"></span> · <span class="host"></span> · <span class="date"></span>`;
-    meta.querySelector(".kind").textContent = savedDocument.kind === "pdf" ? "PDF" : "Article";
+    meta.querySelector(".kind").textContent = savedDocument.kind === "pdf" ? "PDF" : savedDocument.kind === "youtube" ? "YouTube" : "Article";
     meta.querySelector(".host").textContent = hostname;
     meta.querySelector(".date").textContent = new Date(savedDocument.lastViewedAt || savedDocument.updatedAt).toLocaleDateString();
     const excerpt = document.createElement("p");

@@ -36,6 +36,7 @@ const packageFiles = [
   "reader.html",
   "reader.js",
   "service-worker.js",
+  "youtube-transcript.js",
 ];
 
 await mkdir(releaseDir, { recursive: true });

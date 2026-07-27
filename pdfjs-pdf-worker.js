@@ -183,6 +183,7 @@ function liftPdfTextRegions(tokens, regions, visuals) {
     const italicCharacters = regionTokens.reduce((sum, token) => sum + (token.isItalic ? token.text.length : 0), 0);
     blocks.push({
       type: "text", text: rows.map(joinRowTokens).join("\n"),
+      isHorizontal: true,
       fontSize: regionTokens.reduce((sum, token) => sum + token.fontSize * token.text.length, 0) / Math.max(1, characterCount),
       isBold: boldCharacters / Math.max(1, characterCount) >= 0.5,
       isItalic: italicCharacters / Math.max(1, characterCount) >= 0.5,
@@ -192,6 +193,7 @@ function liftPdfTextRegions(tokens, regions, visuals) {
   for (const row of tokenRows(horizontal.filter((token) => !claimed.has(token)))) {
     blocks.push({
       type: "text", text: joinRowTokens(row), layoutLabel: "Text",
+      isHorizontal: true,
       fontSize: row.reduce((sum, token) => sum + token.fontSize, 0) / row.length,
       isBold: row.filter((token) => token.isBold).length / row.length >= 0.5,
       isItalic: row.filter((token) => token.isItalic).length / row.length >= 0.5,
