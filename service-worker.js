@@ -13,7 +13,7 @@ async function pointsToPdf(url) {
 chrome.action.onClicked.addListener(async (tab) => {
   const sourceUrl = tab.url || "";
   if (!tab.id || !/^(https?|file):\/\//i.test(sourceUrl)) {
-    await chrome.tabs.create({ url: chrome.runtime.getURL("reader.html?error=unsupported") });
+    await chrome.tabs.create({ url: chrome.runtime.getURL("library.html") });
     return;
   }
 

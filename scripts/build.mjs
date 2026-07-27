@@ -97,6 +97,39 @@ await build({
   legalComments: "eof",
 });
 
+await build({
+  entryPoints: [path.join(extensionDir, "library-store.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "library-store.js"),
+  legalComments: "eof",
+});
+
+await build({
+  entryPoints: [path.join(extensionDir, "embedding-worker.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "embedding-worker.js"),
+  legalComments: "eof",
+});
+
+await build({
+  entryPoints: [path.join(extensionDir, "library.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "library.js"),
+  legalComments: "eof",
+});
+
 await copyFile(path.join(extensionDir, "node_modules", "katex", "dist", "katex.min.css"), path.join(extensionDir, "katex.css"));
 for (const file of ["KaTeX_AMS-Regular.woff2", "KaTeX_Caligraphic-Bold.woff2", "KaTeX_Caligraphic-Regular.woff2", "KaTeX_Fraktur-Bold.woff2", "KaTeX_Fraktur-Regular.woff2", "KaTeX_Main-Bold.woff2", "KaTeX_Main-BoldItalic.woff2", "KaTeX_Main-Italic.woff2", "KaTeX_Main-Regular.woff2", "KaTeX_Math-BoldItalic.woff2", "KaTeX_Math-Italic.woff2", "KaTeX_SansSerif-Bold.woff2", "KaTeX_SansSerif-Italic.woff2", "KaTeX_SansSerif-Regular.woff2", "KaTeX_Script-Regular.woff2", "KaTeX_Size1-Regular.woff2", "KaTeX_Size2-Regular.woff2", "KaTeX_Size3-Regular.woff2", "KaTeX_Size4-Regular.woff2", "KaTeX_Typewriter-Regular.woff2"]) {
   await copyFile(path.join(extensionDir, "node_modules", "katex", "dist", "fonts", file), path.join(extensionDir, "fonts", file));

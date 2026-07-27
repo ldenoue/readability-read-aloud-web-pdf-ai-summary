@@ -24,10 +24,20 @@ Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Cl
 - Converts detected formulas to LaTeX locally and renders them with KaTeX.
 - Produces concise on-device summaries with the browser's built-in Summarizer API when available.
 - Reads content aloud with PocketTTS or Inflect Micro/Nano, with selectable voices and sentence-level highlighting.
+- Saves processed articles, PDFs, and generated local AI summaries so reader tabs survive refreshes without repeating work.
+- Provides a private recent-reading library with Orama full-text and hybrid semantic search across titles, URLs, and content.
 - Normalizes punctuation and URLs for more natural speech, skips navigation and code, and announces article images from their accessible descriptions.
 - Downloads voice and optional recognition models only when needed, then keeps them in persistent browser storage for reuse.
 
 Article extraction, PDF conversion, layout analysis, speech synthesis, and supported summarization all happen locally. The extension does not send article or PDF text to an application server. Model files are downloaded directly from Hugging Face when first required.
+
+## Local library and search
+
+Every successfully extracted article and processed PDF receives a stable, URL-derived document ID and is saved in the browser with [localForage](https://github.com/localForage/localForage). Refreshing or reopening its reader URL restores the saved passages, PDF crops, reconstructed tables, formulas, metadata, and generated summary instead of downloading and processing the source again.
+
+The library lists the 100 most recently viewed documents and searches their titles, source URLs, and complete extracted content. [Orama](https://github.com/oramasearch/orama) supplies BM25 full-text search, typo tolerance, vector indexing, and hybrid ranking. A quantized [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) model generates 384-dimensional embeddings locally through [Transformers.js](https://github.com/huggingface/transformers.js) and [ONNX Runtime Web](https://github.com/microsoft/onnxruntime). Embeddings are created in a dedicated worker, capped per document to control storage and indexing time, and stored alongside the document. Full-text indexing always covers the entire document.
+
+Select **Search local library** in the reader, click the Readability Reader logo, or click the extension toolbar icon from a page it cannot extract to open the library. Individual documents or the complete local library can be removed from the library page. No saved content, summaries, search terms, or embeddings leave the device.
 
 ## Build from source
 
@@ -82,13 +92,16 @@ Image-only scanned PDFs have no extractable text and currently require a separat
 
 ## Local storage
 
-Downloaded voices and model weights are cached persistently so they do not need to be fetched for every reading session. **Clear all cached models/voices** removes those assets and resets the in-memory speech engines. Provider, voice, model, and playback preferences are stored separately in browser-local extension storage.
+Articles, processed PDFs, PDF visual crops, summaries, and semantic embeddings are stored in IndexedDB through localForage. Downloaded voices and model weights use persistent browser caches so they do not need to be fetched for every reading session. **Clear all cached models/voices** removes model assets and resets the in-memory speech engines without deleting the reading library. Provider, voice, model, and playback preferences are stored separately in browser-local extension storage.
 
 ## Third-party components
 
 - [Mozilla Readability](https://github.com/mozilla/readability) for article extraction.
 - [PDF.js](https://github.com/mozilla/pdf.js) for PDF parsing and rendering (Apache-2.0).
 - [KaTeX](https://katex.org/) for formula rendering.
-- [Transformers.js](https://github.com/huggingface/transformers.js) and ONNX Runtime Web for local document models.
+- [Transformers.js](https://github.com/huggingface/transformers.js) and [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) for local document and embedding inference.
+- [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) for local semantic-search embeddings.
+- [Orama](https://github.com/oramasearch/orama) for local full-text, vector, and hybrid search.
+- [localForage](https://github.com/localForage/localForage) for durable browser-side document storage.
 - [Texo / FormulaNet](https://github.com/alephpi/Texo) for formula recognition (AGPL-3.0).
 - [PocketTTS](https://github.com/kyutai-labs/pocket-tts), [Inflect Micro](https://huggingface.co/owensong/Inflect-Micro-v2-ONNX), and [Inflect Nano](https://huggingface.co/owensong/Inflect-Nano-v2-ONNX) for local speech synthesis.

@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Readability Read Aloud",
-  "version": "0.23.0",
+  "version": "0.24.0",
   "description": "Extract articles and PDFs, generate private local AI summaries, and read them aloud with local TTS.",
   "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "tabs"],
   "host_permissions": ["https://huggingface.co/*", "file:///*"],

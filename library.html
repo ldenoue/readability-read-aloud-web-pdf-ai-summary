@@ -1,0 +1,37 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <title>Library · Readability Reader</title>
+    <link rel="stylesheet" href="library.css" />
+  </head>
+  <body>
+    <header>
+      <a class="brand" href="library.html"><img src="icons/icon.svg" alt="" aria-hidden="true" /> Readability Reader</a>
+      <span>Local library</span>
+    </header>
+    <main>
+      <section class="hero">
+        <p class="eyebrow">Your private reading history</p>
+        <h1>Find anything you’ve read.</h1>
+        <p>Articles and processed PDFs stay on this device. Search titles, addresses, and content - or use local semantic search to find related ideas.</p>
+        <label class="search-field">
+          <span aria-hidden="true">⌕</span>
+          <input id="search" type="search" placeholder="Search your library" autocomplete="off" autofocus />
+        </label>
+        <div class="search-meta"><span id="status">Loading recent documents…</span><button id="clearLibrary" type="button" hidden>Clear library</button></div>
+      </section>
+      <section>
+        <h2 id="resultsHeading">Recently viewed</h2>
+        <div id="results" class="results" aria-live="polite"></div>
+        <div id="empty" class="empty" hidden>
+          <img src="icons/icon.svg" alt="" aria-hidden="true" />
+          <h2>No saved reading yet</h2>
+          <p>Open an article or PDF with Readability Reader and it will appear here.</p>
+        </div>
+      </section>
+    </main>
+    <script type="module" src="dist/library.js"></script>
+  </body>
+</html>

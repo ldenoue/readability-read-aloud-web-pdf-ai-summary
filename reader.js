@@ -2,6 +2,8 @@ import { InflectTTS } from "./inflect-tts.js";
 import { PocketTTS } from "./pocket-tts.js";
 import { marked } from "./dist/marked.esm.js";
 import { renderMath } from "./dist/katex-render.js";
+import { embeddingTexts, getDocument, getDocumentByUrl, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
+import { embedTexts } from "./embedding-client.js";
 
 const $ = (selector) => document.querySelector(selector);
 const state = { passages: [], index: 0, sentence: 0, run: 0, reading: false, language: "" };
@@ -14,6 +16,58 @@ let summaryApiSupported = false;
 let documentReady = false;
 let summaryStarted = false;
 let summaryPreference = "auto";
+let activeDocumentId = "";
+
+function dataUrl(blob) {
+  return new Promise((resolve, reject) => {
+    const reader = new FileReader();
+    reader.onload = () => resolve(reader.result);
+    reader.onerror = () => reject(reader.error || new Error("Could not save PDF image."));
+    reader.readAsDataURL(blob);
+  });
+}
+
+async function serializablePassages(passages) {
+  return Promise.all(passages.map(async (passage) => {
+    const saved = structuredClone(passage);
+    if (saved.image?.src?.startsWith("blob:")) {
+      const response = await fetch(saved.image.src);
+      saved.image.src = await dataUrl(await response.blob());
+    }
+    return saved;
+  }));
+}
+
+async function persistDocument(input) {
+  const saved = await saveDocument({ ...input, passages: await serializablePassages(input.passages) });
+  activeDocumentId = saved.id;
+  history.replaceState(null, "", `reader.html?doc=${encodeURIComponent(saved.id)}`);
+  setTimeout(() => { void indexSavedDocument(saved); }, 500);
+  return saved;
+}
+
+async function indexSavedDocument(saved) {
+  if (saved.embeddingChunks?.length) return;
+  try {
+    const texts = embeddingTexts(saved);
+    if (!texts.length) return;
+    const vectors = await embedTexts(texts);
+    await updateDocumentEmbeddings(saved.id, texts.map((text, index) => ({ text, vector: vectors[index] })));
+  } catch (error) {
+    console.warn("Local semantic indexing deferred:", error);
+  }
+}
+
+function restoreSavedSummary(summary) {
+  if (!summary?.text) return false;
+  summaryStarted = true;
+  $("#summaryPanel").hidden = false;
+  $("#summaryLoading").hidden = true;
+  $("#summarize").hidden = true;
+  $("#summaryText").textContent = summary.text;
+  $("#summaryText").hidden = false;
+  return true;
+}
 
 async function setupSummarizer() {
   if (!("Summarizer" in globalThis)) {
@@ -188,6 +242,14 @@ async function summarizeLocally() {
       }
       setStatus({ state: "loading", message: "Finishing local summary…" });
       $("#summaryText").textContent = await finalSummarizer.summarize(summaries.join("\n\n"), { context: "Produce the final TLDR of this document." });
+    }
+    const summaryText = $("#summaryText").textContent;
+    if (activeDocumentId && summaryText) {
+      try {
+        await updateDocumentSummary(activeDocumentId, { text: summaryText, language, createdAt: Date.now() });
+      } catch (error) {
+        console.warn("Could not persist local summary:", error);
+      }
     }
     $("#summaryText").hidden = false;
     $("#summaryLoading").hidden = true;
@@ -861,9 +923,35 @@ async function loadArticle() {
   const params = new URLSearchParams(location.search);
   const extractionError = params.get("error");
   if (extractionError) throw new Error(extractionError === "unsupported" ? "Open a regular web page or PDF, then click the extension button." : extractionError);
+  const documentId = params.get("doc");
+  if (documentId) {
+    const saved = await getDocument(documentId);
+    if (!saved) throw new Error("This locally saved document is no longer available.");
+    await touchDocument(documentId);
+    activeDocumentId = documentId;
+    state.language = saved.language || "";
+    summaryLanguagePromise = null;
+    state.passages = (saved.passages || []).map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
+    if (!state.passages.length) throw new Error("This saved document contains no readable text.");
+    $("#sourceLink").href = saved.sourceUrl;
+    try { $("#sourceLink").textContent = saved.kind === "pdf" ? (saved.metadata?.displayTitle || "PDF document") : new URL(saved.sourceUrl).hostname; }
+    catch { $("#sourceLink").textContent = saved.metadata?.displayTitle || "Saved document"; }
+    render(saved.metadata || {}, state.passages, saved.sourceUrl);
+    $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
+    documentReady = true;
+    if (!restoreSavedSummary(saved.summary)) void maybeSummarizeAutomatically();
+    void indexSavedDocument(saved);
+    setStatus({ state: "ready", message: `Restored locally · ${state.passages.length} passages ready` });
+    return;
+  }
   const pdfUrl = params.get("pdf");
   if (pdfUrl) {
     const filename = decodeURIComponent(new URL(pdfUrl).pathname.split("/").pop() || "PDF document").replace(/\.pdf$/i, "");
+    const cached = await getDocumentByUrl(pdfUrl);
+    if (cached?.kind === "pdf") {
+      history.replaceState(null, "", `reader.html?doc=${encodeURIComponent(cached.id)}`);
+      return loadArticle();
+    }
     $("#sourceLink").href = pdfUrl;
     $("#sourceLink").textContent = filename;
     const extracted = await fetchPdf(pdfUrl, (page, pageCount) => {
@@ -877,6 +965,7 @@ async function loadArticle() {
       title: "",
       hideTitle: true,
       site: `${extracted.pageCount} pages`,
+      displayTitle: filename,
     };
     if (!extracted.streamed) {
       const rawPassages = extracted.format === "blocks" ? pdfBlockPassages(extracted.pages) : pdfMarkdownPassages(extracted.markdown, pdfUrl);
@@ -886,8 +975,9 @@ async function loadArticle() {
     render(metadata, state.passages, pdfUrl);
     $("#play").disabled = false;
     documentReady = true;
+    await persistDocument({ kind: "pdf", sourceUrl: pdfUrl, metadata, passages: state.passages, language: state.language, pageCount: extracted.pageCount, summary: null });
     void maybeSummarizeAutomatically();
-    setStatus({ state: "ready", message: `${extracted.pageCount} PDF pages · ${state.passages.length} passages ready` });
+    setStatus({ state: "ready", message: `${extracted.pageCount} PDF pages · saved locally` });
     return;
   }
   const id = params.get("id");
@@ -913,8 +1003,9 @@ async function loadArticle() {
   render(metadata, state.passages, sourceUrl);
   $("#play").disabled = false;
   documentReady = true;
+  await persistDocument({ kind: "article", sourceUrl, metadata, passages: state.passages, language: state.language, summary: null });
   void maybeSummarizeAutomatically();
-  setStatus({ state: "ready", message: `${state.passages.length} passages ready · ${metadata.word_count || "clean text"}` });
+  setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
 }
 
 $("#play").addEventListener("click", readArticle);
