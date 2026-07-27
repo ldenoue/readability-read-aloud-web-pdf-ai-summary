@@ -19,7 +19,10 @@
     <main id="top">
       <aside class="controls">
         <div class="source-card">
-          <span>Source</span>
+          <div class="source-heading">
+            <span>Source</span>
+            <button id="reprocessPdf" type="button" title="Reprocess this PDF" aria-label="Reprocess this PDF" hidden>↻</button>
+          </div>
           <a id="sourceLink" target="_blank" rel="noopener"></a>
         </div>
 
@@ -85,6 +88,11 @@
         </article>
       </div>
     </main>
+
+    <aside id="citationPreview" class="citation-preview" role="tooltip" hidden>
+      <strong></strong>
+      <p></p>
+    </aside>
 
     <script type="module" src="reader.js"></script>
   </body>

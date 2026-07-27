@@ -425,6 +425,19 @@ function pdfBlockPassages(pages) {
     .filter((block) => block.type === "text" && block.fontSize > 0)
     .sort((left, right) => left.fontSize - right.fontSize);
   const bodyFontSize = sizedBlocks[Math.floor(sizedBlocks.length / 2)]?.fontSize || 11;
+  const firstPage = pages.find((page) => page.page === 1);
+  const firstPageText = (firstPage?.blocks || []).filter((block) => {
+    const text = String(block.text || "").replace(/\s+/g, " ").trim();
+    const pageHeight = block.layout?.pageHeight || 0;
+    return block.type === "text"
+      && !["Caption", "Footnote", "List-item"].includes(block.layoutLabel)
+      && text.length >= 8
+      && text.length <= 240
+      && block.fontSize >= bodyFontSize * 1.3
+      && (!pageHeight || block.layout?.y1 <= pageHeight * 0.4);
+  });
+  const likelyTitleBlock = firstPageText.find((block) => block.layoutLabel === "Title")
+    || firstPageText.sort((left, right) => right.fontSize - left.fontSize || (left.layout?.y1 || 0) - (right.layout?.y1 || 0))[0];
   const passages = [];
   for (const page of pages) {
     for (const block of page.blocks || []) {
@@ -446,9 +459,21 @@ function pdfBlockPassages(pages) {
         .replace(/\s+/g, " ")
         .trim();
       if (!text) continue;
-      const fontScale = Math.min(2.4, Math.max(0.78, (block.fontSize || bodyFontSize) / bodyFontSize));
-      const isHeading = ["Title", "Section-header"].includes(block.layoutLabel) || fontScale >= 1.35;
-      passages.push({ type: isHeading ? "heading" : "paragraph", text, pdfText: true, fontScale, page: page.page, layoutLabel: block.layoutLabel, layout: block.layout });
+      const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
+      const isTitle = block === likelyTitleBlock;
+      const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
+        || (fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
+      passages.push({
+        type: isHeading ? "heading" : "paragraph",
+        text,
+        pdfText: true,
+        headingLevel: isTitle ? 1 : isHeading ? 2 : null,
+        isBold: Boolean(block.isBold),
+        isItalic: Boolean(block.isItalic),
+        page: page.page,
+        layoutLabel: block.layoutLabel,
+        layout: block.layout,
+      });
     }
   }
   return mergePdfColumnContinuations(passages);
@@ -752,6 +777,34 @@ function appendPdfLinkedText(container, text, references, figures, isReferenceEn
   appendPdfCitationText(container, text.slice(offset), references, isReferenceEntry);
 }
 
+function showCitationPreview(citation) {
+  const hash = citation.getAttribute("href");
+  if (!hash?.startsWith("#pdf-ref-")) return;
+  const target = document.querySelector(hash);
+  if (!target) return;
+  const preview = $("#citationPreview");
+  const number = hash.slice("#pdf-ref-".length);
+  preview.querySelector("strong").textContent = `Reference ${number}`;
+  preview.querySelector("p").textContent = target.textContent.trim();
+  preview.hidden = false;
+  const linkRect = citation.getBoundingClientRect();
+  const previewRect = preview.getBoundingClientRect();
+  const gap = 9;
+  const left = Math.min(window.innerWidth - previewRect.width - 12, Math.max(12, linkRect.left + linkRect.width / 2 - previewRect.width / 2));
+  const below = linkRect.bottom + gap;
+  const top = below + previewRect.height <= window.innerHeight - 12
+    ? below
+    : Math.max(12, linkRect.top - previewRect.height - gap);
+  preview.style.left = `${left}px`;
+  preview.style.top = `${top}px`;
+  citation.setAttribute("aria-describedby", "citationPreview");
+}
+
+function hideCitationPreview(citation) {
+  $("#citationPreview").hidden = true;
+  citation?.removeAttribute("aria-describedby");
+}
+
 function render(metadata, passages, sourceUrl) {
   const article = $("#article");
   article.replaceChildren();
@@ -770,11 +823,13 @@ function render(metadata, passages, sourceUrl) {
   const figures = associatePdfFigures(passages);
   passages.forEach((passage, index) => {
     if (!metadata.hideTitle && index === 0 && passage.type === "heading" && passage.text === title) return;
-    const element = document.createElement(passage.type === "heading" ? "h2" : ["image", "formula"].includes(passage.type) ? "figure" : passage.type === "table" ? "section" : "p");
+    const element = document.createElement(passage.type === "heading" ? (passage.headingLevel === 1 ? "h1" : "h2") : ["image", "formula"].includes(passage.type) ? "figure" : passage.type === "table" ? "section" : "p");
     element.className = `passage ${passage.type}`;
     if (passage.pdfText) {
       element.classList.add("pdf-text");
-      element.style.setProperty("--pdf-font-scale", passage.fontScale);
+      element.classList.toggle("pdf-title", passage.headingLevel === 1);
+      element.classList.toggle("pdf-bold", Boolean(passage.isBold));
+      element.classList.toggle("pdf-italic", Boolean(passage.isItalic));
     }
     element.dataset.index = index;
     const referenceNumber = passage.pdfText ? passage.text.match(/^\s*\[(\d+)\](?:\s|$)/)?.[1] : null;
@@ -936,6 +991,7 @@ async function loadArticle() {
     $("#sourceLink").href = saved.sourceUrl;
     try { $("#sourceLink").textContent = saved.kind === "pdf" ? (saved.metadata?.displayTitle || "PDF document") : new URL(saved.sourceUrl).hostname; }
     catch { $("#sourceLink").textContent = saved.metadata?.displayTitle || "Saved document"; }
+    $("#reprocessPdf").hidden = saved.kind !== "pdf";
     render(saved.metadata || {}, state.passages, saved.sourceUrl);
     $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
     documentReady = true;
@@ -948,12 +1004,13 @@ async function loadArticle() {
   if (pdfUrl) {
     const filename = decodeURIComponent(new URL(pdfUrl).pathname.split("/").pop() || "PDF document").replace(/\.pdf$/i, "");
     const cached = await getDocumentByUrl(pdfUrl);
-    if (cached?.kind === "pdf") {
+    if (cached?.kind === "pdf" && params.get("reprocess") !== "1") {
       history.replaceState(null, "", `reader.html?doc=${encodeURIComponent(cached.id)}`);
       return loadArticle();
     }
     $("#sourceLink").href = pdfUrl;
     $("#sourceLink").textContent = filename;
+    $("#reprocessPdf").hidden = false;
     const extracted = await fetchPdf(pdfUrl, (page, pageCount) => {
       const rawPassages = pdfBlockPassages([page]);
       state.passages.push(...rawPassages.map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] })));
@@ -975,7 +1032,7 @@ async function loadArticle() {
     render(metadata, state.passages, pdfUrl);
     $("#play").disabled = false;
     documentReady = true;
-    await persistDocument({ kind: "pdf", sourceUrl: pdfUrl, metadata, passages: state.passages, language: state.language, pageCount: extracted.pageCount, summary: null });
+    await persistDocument({ kind: "pdf", sourceUrl: pdfUrl, metadata, passages: state.passages, language: state.language, pageCount: extracted.pageCount, summary: null, embeddingChunks: null });
     void maybeSummarizeAutomatically();
     setStatus({ state: "ready", message: `${extracted.pageCount} PDF pages · saved locally` });
     return;
@@ -1010,6 +1067,11 @@ async function loadArticle() {
 
 $("#play").addEventListener("click", readArticle);
 $("#stop").addEventListener("click", stopReading);
+$("#reprocessPdf").addEventListener("click", () => {
+  const sourceUrl = $("#sourceLink").href;
+  if (!sourceUrl) return;
+  location.href = `reader.html?pdf=${encodeURIComponent(sourceUrl)}&reprocess=1`;
+});
 $("#summarize").addEventListener("click", () => {
   if (summaryStarted) return;
   summaryStarted = true;
@@ -1054,7 +1116,10 @@ $("#article").addEventListener("click", (event) => {
   if (citation) {
     event.preventDefault();
     event.stopPropagation();
-    const target = document.querySelector(citation.getAttribute("href"));
+    const hash = citation.getAttribute("href");
+    const target = document.querySelector(hash);
+    hideCitationPreview(citation);
+    if (target && location.hash !== hash) history.pushState({ pdfCitation: hash }, "", hash);
     target?.scrollIntoView({ behavior: "smooth", block: "center" });
     target?.classList.add("reference-flash");
     setTimeout(() => target?.classList.remove("reference-flash"), 1400);
@@ -1064,6 +1129,22 @@ $("#article").addEventListener("click", (event) => {
   if (!passage) return;
   const sentence = event.target.closest(".sentence");
   readFromPosition(Number(passage.dataset.index), sentence ? Number(sentence.dataset.sentence) : 0);
+});
+$("#article").addEventListener("mouseover", (event) => {
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  if (citation && !citation.contains(event.relatedTarget)) showCitationPreview(citation);
+});
+$("#article").addEventListener("mouseout", (event) => {
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  if (citation && !citation.contains(event.relatedTarget)) hideCitationPreview(citation);
+});
+$("#article").addEventListener("focusin", (event) => {
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  if (citation) showCitationPreview(citation);
+});
+$("#article").addEventListener("focusout", (event) => {
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  if (citation) hideCitationPreview(citation);
 });
 $("#article").addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;

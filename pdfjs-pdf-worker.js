@@ -56,7 +56,10 @@ self.onmessage = async ({ data }) => {
       const visuals = visualDetections(detections);
       const textRegions = detections.filter((region) => ["Text", "Title", "Section-header", "Caption", "Footnote", "List-item"].includes(region.label));
       const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
-      const tokens = pdfTokens(content, viewport);
+      const tokens = pdfTokens(content, viewport, (fontName) => {
+        try { return page.commonObjs?.has(fontName) ? page.commonObjs.get(fontName) : null; }
+        catch { return null; }
+      });
       let blocks = liftPdfTextRegions(tokens, textRegions, visuals);
 
       for (const visual of visuals) {
@@ -110,7 +113,7 @@ self.onmessage = async ({ data }) => {
   }
 };
 
-function pdfTokens(content, viewport) {
+function pdfTokens(content, viewport, fontLookup = () => null) {
   return content.items.flatMap((item, itemIndex) => {
     if (!item.str?.trim() || !item.transform) return [];
     const style = content.styles?.[item.fontName];
@@ -124,10 +127,16 @@ function pdfTokens(content, viewport) {
     const normalUnitY = -advanceUnitX;
     const ascent = fontAscent(style, fontHeight);
     const descent = Math.max(0, fontHeight - ascent);
+    const font = fontLookup(item.fontName);
+    const fontDescription = [item.fontName, style?.fontFamily, font?.name, font?.loadedName, font?.fallbackName, font?.cssFontInfo?.fontFamily]
+      .filter(Boolean)
+      .join(" ");
     const itemBox = {
       text: item.str,
       width,
       fontSize: fontHeight,
+      isBold: /(?:bold|black|heavy|semibold|demi)/i.test(fontDescription),
+      isItalic: /(?:italic|oblique)/i.test(fontDescription),
       originX: tx[4], originY: tx[5], advanceUnitX, advanceUnitY,
       ascentX: normalUnitX * ascent, ascentY: normalUnitY * ascent,
       descentX: -normalUnitX * descent, descentY: -normalUnitY * descent,
@@ -153,7 +162,7 @@ function splitItemTokens(item) {
       [startX + item.descentX, startY + item.descentY], [endX + item.descentX, endY + item.descentY],
     ];
     return {
-      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, isHorizontal: item.isHorizontal,
+      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, isBold: item.isBold, isItalic: item.isItalic, isHorizontal: item.isHorizontal,
       x1: Math.min(...points.map((point) => point[0])), y1: Math.min(...points.map((point) => point[1])),
       x2: Math.max(...points.map((point) => point[0])), y2: Math.max(...points.map((point) => point[1])),
     };
@@ -170,9 +179,13 @@ function liftPdfTextRegions(tokens, regions, visuals) {
     regionTokens.forEach((token) => claimed.add(token));
     const rows = tokenRows(regionTokens);
     const characterCount = regionTokens.reduce((sum, token) => sum + token.text.length, 0);
+    const boldCharacters = regionTokens.reduce((sum, token) => sum + (token.isBold ? token.text.length : 0), 0);
+    const italicCharacters = regionTokens.reduce((sum, token) => sum + (token.isItalic ? token.text.length : 0), 0);
     blocks.push({
       type: "text", text: rows.map(joinRowTokens).join("\n"),
       fontSize: regionTokens.reduce((sum, token) => sum + token.fontSize * token.text.length, 0) / Math.max(1, characterCount),
+      isBold: boldCharacters / Math.max(1, characterCount) >= 0.5,
+      isItalic: italicCharacters / Math.max(1, characterCount) >= 0.5,
       layoutLabel: region.label, x1: region.x1, y1: region.y1, x2: region.x2, y2: region.y2,
     });
   }
@@ -180,6 +193,8 @@ function liftPdfTextRegions(tokens, regions, visuals) {
     blocks.push({
       type: "text", text: joinRowTokens(row), layoutLabel: "Text",
       fontSize: row.reduce((sum, token) => sum + token.fontSize, 0) / row.length,
+      isBold: row.filter((token) => token.isBold).length / row.length >= 0.5,
+      isItalic: row.filter((token) => token.isItalic).length / row.length >= 0.5,
       x1: Math.min(...row.map((token) => token.x1)), y1: Math.min(...row.map((token) => token.y1)),
       x2: Math.max(...row.map((token) => token.x2)), y2: Math.max(...row.map((token) => token.y2)),
     });
