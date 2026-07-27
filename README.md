@@ -37,7 +37,9 @@ Every successfully extracted article and processed PDF receives a stable, URL-de
 
 The library lists the 100 most recently viewed documents and searches their titles, source URLs, and complete extracted content. [Orama](https://github.com/oramasearch/orama) supplies BM25 full-text search, typo tolerance, vector indexing, and hybrid ranking. A quantized [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) model generates 384-dimensional embeddings locally through [Transformers.js](https://github.com/huggingface/transformers.js) and [ONNX Runtime Web](https://github.com/microsoft/onnxruntime). Embeddings are created in a dedicated worker, capped per document to control storage and indexing time, and stored alongside the document. Full-text indexing always covers the entire document.
 
-Select **Search local library** in the reader, click the Readability Reader logo, or click the extension toolbar icon from a page it cannot extract to open the library. Individual documents or the complete local library can be removed from the library page. No saved content, summaries, search terms, or embeddings leave the device.
+The reader keeps a wide search box directly beside the **Readability Reader** logo, so the saved library is reachable without leaving the article controls. Entering a query opens the library with that search already active; the library keeps the same search box in its header and updates results as you type. Clicking the logo opens recent documents without a query, and clicking the extension toolbar icon from a page it cannot extract also opens the library.
+
+Individual documents or the complete local library can be removed from the library page. No saved content, summaries, search terms, or embeddings leave the device.
 
 ## Build from source
 
