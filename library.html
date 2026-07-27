@@ -9,6 +9,10 @@
   <body>
     <header>
       <a class="brand" href="library.html"><img src="icons/icon.svg" alt="" aria-hidden="true" /> Readability Reader</a>
+      <label class="header-search">
+        <span aria-hidden="true">⌕</span>
+        <input id="search" type="search" placeholder="Search saved articles and PDFs" autocomplete="off" autofocus aria-label="Search saved articles and PDFs" />
+      </label>
       <span>Local library</span>
     </header>
     <main>
@@ -16,10 +20,6 @@
         <p class="eyebrow">Your private reading history</p>
         <h1>Find anything you’ve read.</h1>
         <p>Articles and processed PDFs stay on this device. Search titles, addresses, and content - or use local semantic search to find related ideas.</p>
-        <label class="search-field">
-          <span aria-hidden="true">⌕</span>
-          <input id="search" type="search" placeholder="Search your library" autocomplete="off" autofocus />
-        </label>
         <div class="search-meta"><span id="status">Loading recent documents…</span><button id="clearLibrary" type="button" hidden>Clear library</button></div>
       </section>
       <section>

@@ -7,6 +7,8 @@ let library = [];
 let searchIndex;
 let searchRun = 0;
 let timer;
+const initialQuery = new URLSearchParams(location.search).get("q") || "";
+$("#search").value = initialQuery;
 
 function titleOf(savedDocument) {
   if (savedDocument.metadata?.title) return savedDocument.metadata.title;
@@ -115,6 +117,8 @@ function documentsFromHits(hits) {
 async function runSearch() {
   const run = ++searchRun;
   const query = $("#search").value.trim();
+  const nextUrl = query ? `library.html?q=${encodeURIComponent(query)}` : "library.html";
+  history.replaceState(null, "", nextUrl);
   if (!query) {
     render(library);
     $("#status").textContent = `${library.length} locally saved document${library.length === 1 ? "" : "s"}`;
