@@ -109,6 +109,17 @@ await build({
 });
 
 await build({
+  entryPoints: [path.join(extensionDir, "pdf-export.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "pdf-export.js"),
+  legalComments: "eof",
+});
+
+await build({
   entryPoints: [path.join(extensionDir, "library-store.js")],
   bundle: true,
   minify: true,

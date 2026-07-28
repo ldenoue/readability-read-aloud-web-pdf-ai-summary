@@ -16,7 +16,7 @@
 
 ## What it does
 
-Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Click its toolbar button on an article, PDF, X long-form article, or YouTube video to open the content in a quiet, responsive reading view.
+Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Click its toolbar button on an article, PDF, ChatGPT conversation, X long-form article, or YouTube video to open the content in a quiet, responsive reading view.
 
 - Extracts article content locally with Mozilla Readability.
 - Extracts X long-form articles from their dedicated rich-text container, including headings, lists, quotations, and images.
@@ -28,10 +28,15 @@ Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Cl
 - Reads content aloud with PocketTTS or Inflect Micro/Nano, with selectable voices and sentence-level highlighting.
 - Saves processed articles, PDFs, YouTube transcripts, X articles, and generated local AI summaries so reader tabs survive refreshes without repeating work.
 - Provides a private recent-reading library with Orama full-text and hybrid semantic search across titles, URLs, and content.
+- Exports the cleaned reading view as a paginated PDF for sharing or attaching to email, including its source, byline, and available local AI summary.
 - Normalizes punctuation and URLs for more natural speech, skips navigation and code, and announces article images from their accessible descriptions.
 - Downloads voice and optional recognition models only when needed, then keeps them in persistent browser storage for reuse.
 
 Article extraction, PDF conversion, layout analysis, transcript formatting, speech synthesis, and supported summarization all happen locally. The extension does not send extracted content to an application server. YouTube metadata and captions are fetched directly from YouTube; model files are downloaded directly from Hugging Face when first required.
+
+## Export to PDF
+
+Once an article is ready, select **Export article as PDF** in the reader controls. The extension uses [dompdf.js](https://github.com/lmn1919/dompdf.js) locally to turn the cleaned article, images, source details, and saved local AI summary into a paginated A4 PDF. Article images are downloaded when the document is first saved and stored alongside its passages, so PDF export never depends on a remote image host. The resulting file downloads directly from the browser; no document content is sent to a conversion service.
 
 ## Local library and search
 
@@ -94,27 +99,30 @@ PDF.js provides positioned text extraction and page rendering. A bundled DocLayN
 
 Saved PDFs include a reprocess button for rerunning extraction after the pipeline improves. Numbered references support hover and keyboard previews, and citation jumps add a history entry so the browser Back button returns to the previous reading position.
 
-## YouTube and X
+## ChatGPT, YouTube, and X
+
+ChatGPT conversation pages use a dedicated extractor that collects every visible user and assistant turn instead of asking generic article heuristics to select one message. Split assistant response fragments are reunited, message roles remain visible, and images and code blocks are retained in the saved, searchable conversation.
 
 For YouTube watch, short, live, embed, and share links, the extension requests available captions directly from YouTube and formats them into complete sentences with `Intl.Segmenter`. Chapter headings move to the end of the sentence containing their timestamp so they do not split speech. A `>>` marker starts an em-dash speaker paragraph only when followed by an uppercase word; false markers inside a sentence are removed.
 
-X long-form articles use the platform's dedicated rich-text article container instead of generic page extraction. The extractor preserves semantic blocks and media, reads the dedicated article title, resolves author names and handles, replaces emoji images with accessible text, and requests larger X media variants. The implementation incorporates robust extraction patterns from Defuddle.
+X long-form articles use the platform's dedicated rich-text article container instead of generic page extraction. The extractor preserves semantic blocks, header and inline images, embedded posts, bold text, and code sections; reads the dedicated article title; resolves author names and handles; replaces emoji images with accessible text; and requests larger X media variants. The ChatGPT and X implementations incorporate robust extraction patterns from Defuddle.
 
 Image-only scanned PDFs have no extractable text and currently require a separate OCR engine.
 
 ## Local storage
 
-Articles, processed PDFs, PDF visual crops, X articles, YouTube transcripts, summaries, and semantic embeddings are stored in IndexedDB through localForage. Downloaded voices and model weights use persistent browser caches so they do not need to be fetched for every reading session. **Clear all cached models/voices** removes model assets and resets the in-memory speech engines without deleting the reading library. Provider, voice, model, and playback preferences are stored separately in browser-local extension storage.
+Articles, article images, processed PDFs, PDF visual crops, ChatGPT conversations, X articles, YouTube transcripts, summaries, and semantic embeddings are stored in IndexedDB through localForage. Downloaded voices and model weights use persistent browser caches so they do not need to be fetched for every reading session. **Clear all cached models/voices** removes model assets and resets the in-memory speech engines without deleting the reading library. Provider, voice, model, and playback preferences are stored separately in browser-local extension storage.
 
 ## Third-party components
 
 - [Mozilla Readability](https://github.com/mozilla/readability) for article extraction.
-- [Defuddle](https://github.com/kepano/defuddle) for robust X/Twitter extraction patterns (MIT).
+- [Defuddle](https://github.com/kepano/defuddle) for robust ChatGPT and X/Twitter extraction patterns (MIT).
 - [PDF.js](https://github.com/mozilla/pdf.js) for PDF parsing and rendering (Apache-2.0).
 - [KaTeX](https://katex.org/) for formula rendering.
 - [Transformers.js](https://github.com/huggingface/transformers.js) and [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) for local document and embedding inference.
 - [all-MiniLM-L6-v2](https://huggingface.co/Xenova/all-MiniLM-L6-v2) for local semantic-search embeddings.
 - [Orama](https://github.com/oramasearch/orama) for local full-text, vector, and hybrid search.
 - [localForage](https://github.com/localForage/localForage) for durable browser-side document storage.
+- [dompdf.js](https://github.com/lmn1919/dompdf.js) for local, paginated PDF export.
 - [Texo / FormulaNet](https://github.com/alephpi/Texo) for formula recognition (AGPL-3.0).
 - [PocketTTS](https://github.com/kyutai-labs/pocket-tts), [Inflect Micro](https://huggingface.co/owensong/Inflect-Micro-v2-ONNX), and [Inflect Nano](https://huggingface.co/owensong/Inflect-Nano-v2-ONNX) for local speech synthesis.

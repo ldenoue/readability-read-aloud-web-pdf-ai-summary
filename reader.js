@@ -3,6 +3,7 @@ import { PocketTTS } from "./pocket-tts.js";
 import { marked } from "./dist/marked.esm.js";
 import { renderMath } from "./dist/katex-render.js";
 import { linkMatches } from "./dist/linkify.js";
+import { renderArticlePdf } from "./dist/pdf-export.js";
 import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
 import { embedTexts } from "./embedding-client.js";
 
@@ -19,6 +20,7 @@ let summaryStarted = false;
 let summaryPreference = "auto";
 let activeDocumentId = "";
 let activeSourceUrl = "";
+let activeMetadata = {};
 
 function dataUrl(blob) {
   return new Promise((resolve, reject) => {
@@ -29,19 +31,69 @@ function dataUrl(blob) {
   });
 }
 
+async function imageBlobDimensions(blob) {
+  try {
+    const bitmap = await createImageBitmap(blob);
+    const dimensions = { width: bitmap.width, height: bitmap.height };
+    bitmap.close();
+    return dimensions;
+  } catch {
+    return {};
+  }
+}
+
+async function localImageAsset(source) {
+  if (!source) return { src: source };
+  if (source.startsWith("data:")) {
+    const blob = await (await fetch(source)).blob();
+    return { src: source, ...await imageBlobDimensions(blob) };
+  }
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 15000);
+  try {
+    const response = await fetch(source, { credentials: "include", signal: controller.signal });
+    if (!response.ok) throw new Error(`Image request returned ${response.status}`);
+    const blob = await response.blob();
+    if (!blob.type.startsWith("image/")) throw new Error("Downloaded resource is not an image");
+    return { src: await dataUrl(blob), ...await imageBlobDimensions(blob) };
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
 async function serializablePassages(passages) {
   return Promise.all(passages.map(async (passage) => {
     const saved = structuredClone(passage);
-    if (saved.image?.src?.startsWith("blob:")) {
-      const response = await fetch(saved.image.src);
-      saved.image.src = await dataUrl(await response.blob());
+    if (saved.image?.src && (!saved.image.src.startsWith("data:") || !(saved.image.width > 0 && saved.image.height > 0))) {
+      try {
+        const asset = await localImageAsset(saved.image.src);
+        saved.image.src = asset.src;
+        saved.image.width ||= asset.width;
+        saved.image.height ||= asset.height;
+      } catch (error) {
+        console.warn("Could not save article image locally:", saved.image.src, error);
+        saved.image.src = "";
+        saved.image.unavailable = true;
+      }
     }
     return saved;
   }));
 }
 
+function usePersistedPassages(passages) {
+  state.passages = passages.map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
+  [...$("#article").querySelectorAll(".passage")].forEach((element, index) => {
+    const image = element.querySelector("img");
+    if (!image) return;
+    const source = state.passages[index]?.image?.src;
+    if (source) image.src = source;
+    else image.remove();
+  });
+}
+
 async function persistDocument(input) {
   const saved = await saveDocument({ ...input, passages: await serializablePassages(input.passages) });
+  usePersistedPassages(saved.passages || []);
   activeDocumentId = saved.id;
   $("#deleteDocument").hidden = false;
   history.replaceState(null, "", `reader.html?doc=${encodeURIComponent(saved.id)}`);
@@ -385,12 +437,14 @@ function markdownPassages(markdown) {
 
 function htmlPassages(html, sourceUrl) {
   const document = new DOMParser().parseFromString(html, "text/html");
-  document.querySelectorAll("script, style, noscript, pre, code, nav, form").forEach((element) => element.remove());
+  document.querySelectorAll("script, style, noscript, nav, form").forEach((element) => element.remove());
   const passages = [];
-  for (const element of document.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote, li, img")) {
+  for (const element of document.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, img")) {
     if (element.matches("img")) {
       const rawSource = element.getAttribute("src") || element.getAttribute("data-src") || element.getAttribute("data-original");
-      if (!rawSource || Number(element.getAttribute("width")) <= 2 || Number(element.getAttribute("height")) <= 2) continue;
+      const width = element.getAttribute("width");
+      const height = element.getAttribute("height");
+      if (!rawSource || (width !== null && Number(width) <= 2) || (height !== null && Number(height) <= 2)) continue;
       let src;
       try {
         const resolved = new URL(rawSource, sourceUrl);
@@ -398,14 +452,32 @@ function htmlPassages(html, sourceUrl) {
         src = resolved.href;
       } catch { continue; }
       const description = (element.getAttribute("alt") || element.getAttribute("title") || "").replace(/\s+/g, " ").trim();
+      const intrinsicWidth = Number.parseFloat(element.getAttribute("width"));
+      const intrinsicHeight = Number.parseFloat(element.getAttribute("height"));
       passages.push({
         type: "image",
         text: description ? `Picture of ${description}` : "",
         description,
-        image: { src, alt: description },
+        image: {
+          src,
+          alt: description,
+          ...(intrinsicWidth > 0 && intrinsicHeight > 0 ? { width: intrinsicWidth, height: intrinsicHeight } : {}),
+        },
       });
       continue;
     }
+    if (element.matches("pre")) {
+      const text = element.querySelector("code")?.textContent || element.textContent || "";
+      if (!text.trim()) continue;
+      const code = element.querySelector("code");
+      passages.push({
+        type: "code",
+        text,
+        language: code?.getAttribute("data-lang") || code?.className.match(/(?:^|\s)language-([\w-]+)/)?.[1] || "",
+      });
+      continue;
+    }
+    if (element.closest("pre")) continue;
     if (element.matches("li") && element.querySelector("p, blockquote")) continue;
     const text = element.textContent
       .replace(/https?:\/\/\S+/g, "")
@@ -416,6 +488,10 @@ function htmlPassages(html, sourceUrl) {
     passages.push({ type: element.matches("h1, h2, h3, h4, h5, h6") ? "heading" : "paragraph", text });
   }
   return passages;
+}
+
+function passageSentences(passage) {
+  return passage.type === "code" || !passage.text ? [] : sentences(passage.text);
 }
 
 function pdfMarkdownPassages(markdown, sourceUrl) {
@@ -474,7 +550,7 @@ function pdfBlockPassages(pages) {
       if (block.isPageNumber) continue;
       if (block.type === "table" && block.table?.rows?.length) {
         const src = block.bytes ? URL.createObjectURL(new Blob([block.bytes], { type: block.mime || "image/png" })) : "";
-        passages.push({ type: "table", text: "", table: block.table, image: src ? { src, alt: "Original PDF table" } : null, page: page.page, layout: block.layout });
+        passages.push({ type: "table", text: "", table: block.table, image: src ? { src, alt: "Original PDF table", width: block.width, height: block.height } : null, page: page.page, layout: block.layout });
         continue;
       }
       if (block.type === "image" && block.bytes) {
@@ -984,9 +1060,20 @@ function associatePdfReferences(passages) {
   return { entries, numbers: new Set(entries.values()) };
 }
 
+function preserveImageAspectRatio(image, dimensions = {}) {
+  const width = Number(dimensions.width);
+  const height = Number(dimensions.height);
+  if (!(width > 0 && height > 0)) return;
+  image.width = Math.round(width);
+  image.height = Math.round(height);
+  image.style.aspectRatio = `${width} / ${height}`;
+  image.style.height = "auto";
+}
+
 function render(metadata, passages, sourceUrl) {
   const article = $("#article");
   activeSourceUrl = sourceUrl;
+  activeMetadata = metadata;
   article.replaceChildren();
   try { article.classList.toggle("youtube-transcript", /^(?:www\.|m\.)?youtube\.com$/i.test(new URL(sourceUrl).hostname)); }
   catch { article.classList.remove("youtube-transcript"); }
@@ -1003,7 +1090,7 @@ function render(metadata, passages, sourceUrl) {
   const visuals = associatePdfVisuals(passages);
   passages.forEach((passage, index) => {
     if (!metadata.hideTitle && index === 0 && passage.type === "heading" && passage.text === title) return;
-    const element = document.createElement(passage.type === "heading" ? (passage.headingLevel === 1 ? "h1" : "h2") : ["image", "formula"].includes(passage.type) ? "figure" : passage.type === "table" ? "section" : "p");
+    const element = document.createElement(passage.type === "heading" ? (passage.headingLevel === 1 ? "h1" : "h2") : ["image", "formula"].includes(passage.type) ? "figure" : passage.type === "table" ? "section" : passage.type === "code" ? "pre" : "p");
     element.className = `passage ${passage.type}`;
     if (passage.pdfText) {
       element.classList.add("pdf-text");
@@ -1017,7 +1104,12 @@ function render(metadata, passages, sourceUrl) {
     if (passage.figureNumber) element.id = `pdf-figure-${passage.figureNumber}`;
     if (passage.tableNumber) element.id = `pdf-table-${passage.tableNumber}`;
     if (passage.visualCaption) element.dataset.previewCaption = passage.visualCaption;
-    if (passage.type === "table") {
+    if (passage.type === "code") {
+      const code = document.createElement("code");
+      if (passage.language) { code.className = `language-${passage.language}`; code.dataset.lang = passage.language; }
+      code.textContent = passage.text;
+      element.append(code);
+    } else if (passage.type === "table") {
       const table = document.createElement("table");
       for (const row of passage.table.rows) {
         const tr = document.createElement("tr");
@@ -1036,6 +1128,7 @@ function render(metadata, passages, sourceUrl) {
         const image = document.createElement("img");
         image.src = passage.image.src;
         image.alt = passage.image.alt;
+        preserveImageAspectRatio(image, passage.image);
         details.append(summary, image);
         element.append(details);
       }
@@ -1058,6 +1151,7 @@ function render(metadata, passages, sourceUrl) {
       image.src = passage.image.src;
       image.alt = passage.image.alt || "";
       image.loading = "lazy";
+      preserveImageAspectRatio(image, passage.image);
       element.append(image);
     }
     let passageTextOffset = 0;
@@ -1085,6 +1179,166 @@ function render(metadata, passages, sourceUrl) {
     });
     article.append(element);
   });
+}
+
+function safePdfFilename(value) {
+  const name = String(value || "article").normalize("NFKC")
+    .replace(/[\\/:*?"<>|\u0000-\u001F]/g, " ")
+    .replace(/\s+/g, " ").trim().slice(0, 120);
+  return `${name || "article"}.pdf`;
+}
+
+function unwrapExportSentences(container) {
+  container.querySelectorAll(".sentence").forEach((sentence) => {
+    sentence.replaceWith(...sentence.childNodes);
+  });
+}
+
+async function waitForExportImages(container) {
+  await Promise.all([...container.querySelectorAll("img")].map(async (image) => {
+    if (image.complete) return;
+    try {
+      await Promise.race([
+        image.decode(),
+        new Promise((resolve) => setTimeout(resolve, 5000)),
+      ]);
+    } catch {}
+  }));
+}
+
+function preserveExportImageRatios(container) {
+  for (const image of container.querySelectorAll("img")) {
+    const width = Number(image.getAttribute("width")) || image.naturalWidth;
+    const height = Number(image.getAttribute("height")) || image.naturalHeight;
+    preserveImageAspectRatio(image, { width, height });
+  }
+}
+
+async function localizeExportImages(container) {
+  await Promise.all([...container.querySelectorAll("img")].map(async (image) => {
+    if (!image.src || image.src.startsWith("data:")) return;
+    try {
+      const asset = await localImageAsset(image.src);
+      image.src = asset.src;
+      preserveImageAspectRatio(image, asset);
+    } catch (error) {
+      console.warn("Omitting an image that could not be prepared for PDF export:", image.src, error);
+      image.remove();
+    }
+  }));
+}
+
+function legacyCssColors(value) {
+  return String(value || "").replace(/color\((?:srgb|display-p3)\s+([\d.]+%?)\s+([\d.]+%?)\s+([\d.]+%?)(?:\s*\/\s*([\d.]+%?))?\)/giu, (_, red, green, blue, alpha = "1") => {
+    const channel = (part) => part.endsWith("%")
+      ? Math.round(Math.min(100, Number.parseFloat(part)) * 2.55)
+      : Math.round(Math.min(1, Number.parseFloat(part)) * 255);
+    const opacity = alpha.endsWith("%")
+      ? Math.min(100, Number.parseFloat(alpha)) / 100
+      : Math.min(1, Number.parseFloat(alpha));
+    return opacity < 1
+      ? `rgba(${channel(red)}, ${channel(green)}, ${channel(blue)}, ${opacity})`
+      : `rgb(${channel(red)}, ${channel(green)}, ${channel(blue)})`;
+  });
+}
+
+function flattenExportColors(container) {
+  const properties = [
+    "color", "backgroundColor", "borderTopColor", "borderRightColor", "borderBottomColor",
+    "borderLeftColor", "outlineColor", "textDecorationColor", "boxShadow", "textShadow",
+  ];
+  for (const element of [container, ...container.querySelectorAll("*")]) {
+    const computed = getComputedStyle(element);
+    for (const property of properties) {
+      const value = computed[property];
+      if (value?.includes("color(")) element.style[property] = legacyCssColors(value);
+    }
+  }
+}
+
+function withTimeout(promise, milliseconds, message) {
+  return Promise.race([
+    promise,
+    new Promise((_, reject) => setTimeout(() => reject(new Error(message)), milliseconds)),
+  ]);
+}
+
+async function exportCurrentArticle() {
+  const button = $("#exportPdf");
+  button.disabled = true;
+  const previousLabel = button.textContent;
+  button.textContent = "Preparing PDF…";
+  setStatus({ state: "loading", message: "Preparing PDF locally…" });
+  const exportRoot = document.createElement("section");
+  exportRoot.className = "pdf-export-document";
+  try {
+    const title = activeMetadata.title || $("#article h1")?.textContent || "Article";
+    const heading = document.createElement("h1");
+    heading.textContent = title;
+    exportRoot.append(heading);
+
+    const details = [activeMetadata.author, activeMetadata.site, activeMetadata.published?.slice(0, 10)].filter(Boolean);
+    if (details.length) {
+      const byline = document.createElement("p");
+      byline.className = "pdf-export-byline";
+      byline.textContent = details.join(" · ");
+      exportRoot.append(byline);
+    }
+    const source = document.createElement("a");
+    source.className = "pdf-export-source";
+    source.href = activeSourceUrl;
+    source.textContent = activeSourceUrl;
+    exportRoot.append(source);
+
+    const summary = $("#summaryText");
+    if (!summary.hidden && summary.textContent && !/^Could not summarize locally:/u.test(summary.textContent)) {
+      const summarySection = document.createElement("section");
+      summarySection.className = "pdf-export-summary";
+      const summaryHeading = document.createElement("h2");
+      summaryHeading.textContent = "Local AI summary";
+      const summaryText = document.createElement("p");
+      summaryText.textContent = summary.textContent;
+      summarySection.append(summaryHeading, summaryText);
+      exportRoot.append(summarySection);
+    }
+
+    const article = $("#article").cloneNode(true);
+    article.removeAttribute("aria-live");
+    article.querySelector(".byline")?.remove();
+    const duplicateTitle = article.querySelector("h1");
+    if (duplicateTitle?.textContent.trim() === title.trim()) duplicateTitle.remove();
+    article.querySelectorAll(".current, .done, .reference-flash").forEach((element) => element.classList.remove("current", "done", "reference-flash"));
+    unwrapExportSentences(article);
+    exportRoot.append(article);
+    document.body.append(exportRoot);
+    await document.fonts.ready;
+    flattenExportColors(exportRoot);
+    await localizeExportImages(exportRoot);
+    await waitForExportImages(exportRoot);
+    preserveExportImageRatios(exportRoot);
+    const blob = await withTimeout(
+      renderArticlePdf(exportRoot),
+      120000,
+      "The PDF renderer took too long.",
+    );
+    if (!(blob instanceof Blob) || !blob.size) throw new Error("The PDF renderer returned an empty document.");
+    const url = URL.createObjectURL(blob);
+    const download = document.createElement("a");
+    download.href = url;
+    download.download = safePdfFilename(title);
+    document.body.append(download);
+    download.click();
+    download.remove();
+    setTimeout(() => URL.revokeObjectURL(url), 30000);
+    setStatus({ state: "ready", message: "PDF exported locally" });
+  } catch (error) {
+    console.error("PDF export failed:", error);
+    setStatus({ state: "error", message: `PDF export failed: ${error.message}` });
+  } finally {
+    exportRoot.remove();
+    button.textContent = previousLabel;
+    button.disabled = !documentReady;
+  }
 }
 
 function markCurrent(index, sentenceIndex = 0) {
@@ -1224,9 +1478,15 @@ async function loadArticle() {
     await touchDocument(documentId);
     activeDocumentId = documentId;
     $("#deleteDocument").hidden = false;
+    const needsImageMigration = (saved.passages || []).some((passage) => passage.image?.src
+      && (!passage.image.src.startsWith("data:") || !(passage.image.width > 0 && passage.image.height > 0)));
+    if (needsImageMigration) {
+      saved.passages = await serializablePassages(saved.passages);
+      await saveDocument(saved);
+    }
     state.language = saved.language || "";
     summaryLanguagePromise = null;
-    state.passages = (saved.passages || []).map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
+    state.passages = (saved.passages || []).map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     if (!state.passages.length) throw new Error("This saved document contains no readable text.");
     $("#sourceLink").href = saved.sourceUrl;
     try { $("#sourceLink").textContent = saved.kind === "pdf" ? (saved.metadata?.displayTitle || "PDF document") : new URL(saved.sourceUrl).hostname; }
@@ -1235,6 +1495,7 @@ async function loadArticle() {
     render(saved.metadata || {}, state.passages, saved.sourceUrl);
     $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
     documentReady = true;
+    $("#exportPdf").disabled = false;
     if (!restoreSavedSummary(saved.summary)) void maybeSummarizeAutomatically();
     void indexSavedDocument(saved);
     setStatus({ state: "ready", message: `Restored locally · ${state.passages.length} passages ready` });
@@ -1253,7 +1514,7 @@ async function loadArticle() {
     $("#reprocessPdf").hidden = false;
     const extracted = await fetchPdf(pdfUrl, (page, pageCount) => {
       const rawPassages = pdfBlockPassages([page]);
-      state.passages.push(...rawPassages.map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] })));
+      state.passages.push(...rawPassages.map((passage) => ({ ...passage, sentences: passageSentences(passage) })));
       render({ title: "", hideTitle: true }, state.passages, pdfUrl);
       $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
       setStatus({ state: "loading", message: `Rendered page ${page.page} of ${pageCount}` });
@@ -1266,16 +1527,17 @@ async function loadArticle() {
     };
     if (!extracted.streamed) {
       const rawPassages = extracted.format === "blocks" ? pdfBlockPassages(extracted.pages) : pdfMarkdownPassages(extracted.markdown, pdfUrl);
-      state.passages = rawPassages.map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
+      state.passages = rawPassages.map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     }
     if (extracted.format === "blocks") {
       state.passages = mergePdfColumnContinuations(removeRepeatedPdfMarginals(state.passages))
-        .map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
+        .map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     }
     if (!state.passages.length) throw new Error("This PDF contains no extractable text. Scanned PDFs require OCR.");
     render(metadata, state.passages, pdfUrl);
     $("#play").disabled = false;
     documentReady = true;
+    $("#exportPdf").disabled = false;
     await persistDocument({ kind: "pdf", sourceUrl: pdfUrl, metadata, passages: state.passages, language: state.language, pageCount: extracted.pageCount, summary: null, embeddingChunks: null });
     void maybeSummarizeAutomatically();
     setStatus({ state: "ready", message: `${extracted.pageCount} PDF pages · saved locally` });
@@ -1301,7 +1563,7 @@ async function loadArticle() {
   };
   let youtubeParagraphIndex = 0;
   state.passages = htmlPassages(article.content, sourceUrl).map((passage) => {
-    const prepared = { ...passage, sentences: passage.text ? sentences(passage.text) : [] };
+    const prepared = { ...passage, sentences: passageSentences(passage) };
     if (article.kind === "youtube" && passage.type === "paragraph") prepared.youtubeSentenceStarts = article.paragraphSentenceStarts?.[youtubeParagraphIndex++] || [];
     return prepared;
   });
@@ -1309,6 +1571,7 @@ async function loadArticle() {
   render(metadata, state.passages, sourceUrl);
   $("#play").disabled = false;
   documentReady = true;
+  $("#exportPdf").disabled = false;
   await persistDocument({ kind: article.kind === "youtube" ? "youtube" : "article", sourceUrl, metadata, passages: state.passages, language: state.language, summary: null, videoId: article.videoId, duration: article.duration, chapters: article.chapters });
   void maybeSummarizeAutomatically();
   setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
@@ -1316,6 +1579,7 @@ async function loadArticle() {
 
 $("#play").addEventListener("click", readArticle);
 $("#stop").addEventListener("click", stopReading);
+$("#exportPdf").addEventListener("click", () => { void exportCurrentArticle(); });
 $("#reprocessPdf").addEventListener("click", () => {
   const sourceUrl = $("#sourceLink").href;
   if (!sourceUrl) return;
