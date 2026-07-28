@@ -515,14 +515,21 @@ function mergePdfColumnContinuations(passages) {
   const merged = [];
   for (const passage of passages) {
     const previous = merged.at(-1);
-    const sameTextFlow = previous?.type === "paragraph" && passage.type === "paragraph" && previous.page === passage.page
+    const adjacentPages = previous && Number.isInteger(previous.page) && Number.isInteger(passage.page)
+      && passage.page >= previous.page && passage.page <= previous.page + 1;
+    const sameTextFlow = previous?.type === "paragraph" && passage.type === "paragraph" && adjacentPages
       && previous.layoutLabel === "Text" && passage.layoutLabel === "Text";
+    const samePage = sameTextFlow && previous.page === passage.page;
     const pageWidth = passage.layout?.pageWidth || previous?.layout?.pageWidth || 0;
-    const jumpsToNextColumn = sameTextFlow && pageWidth > 0
+    const jumpsToNextColumn = samePage && pageWidth > 0
       && passage.layout.x1 > previous.layout.x1 + pageWidth * 0.18
       && passage.layout.y1 < previous.layout.y1;
-    const sentenceContinues = sameTextFlow && (!/[.!?…:;][”’"')\]]?$/u.test(previous.text) || /^\p{Ll}/u.test(passage.text));
-    if (jumpsToNextColumn && sentenceContinues) {
+    const startsMidSentence = sameTextFlow && /^(?:[“‘"']\s*)?\p{Ll}/u.test(passage.text);
+    const previousWithoutTrailingCitations = previous?.text.replace(/(?:\s*\[[\d,;\s-]+\])+\s*$/u, "").trim() || "";
+    const previousSentenceFinished = /[.!?…:;][”’"')\]]?$/u.test(previousWithoutTrailingCitations);
+    const crossesPage = sameTextFlow && passage.page === previous.page + 1;
+    const sentenceContinues = startsMidSentence || !previousSentenceFinished;
+    if (sentenceContinues && (jumpsToNextColumn || startsMidSentence && (samePage || crossesPage))) {
       const hyphenated = /-$/u.test(previous.text) && /^\p{Ll}/u.test(passage.text);
       const prefix = previous.text.replace(hyphenated ? /-$/u : /$/u, "");
       const separator = hyphenated ? "" : " ";
@@ -1261,7 +1268,10 @@ async function loadArticle() {
       const rawPassages = extracted.format === "blocks" ? pdfBlockPassages(extracted.pages) : pdfMarkdownPassages(extracted.markdown, pdfUrl);
       state.passages = rawPassages.map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
     }
-    if (extracted.format === "blocks") state.passages = removeRepeatedPdfMarginals(state.passages);
+    if (extracted.format === "blocks") {
+      state.passages = mergePdfColumnContinuations(removeRepeatedPdfMarginals(state.passages))
+        .map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
+    }
     if (!state.passages.length) throw new Error("This PDF contains no extractable text. Scanned PDFs require OCR.");
     render(metadata, state.passages, pdfUrl);
     $("#play").disabled = false;
