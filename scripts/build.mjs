@@ -98,6 +98,17 @@ await build({
 });
 
 await build({
+  entryPoints: [path.join(extensionDir, "linkify.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "linkify.js"),
+  legalComments: "eof",
+});
+
+await build({
   entryPoints: [path.join(extensionDir, "library-store.js")],
   bundle: true,
   minify: true,

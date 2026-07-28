@@ -162,7 +162,7 @@ function splitItemTokens(item) {
       [startX + item.descentX, startY + item.descentY], [endX + item.descentX, endY + item.descentY],
     ];
     return {
-      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, isBold: item.isBold, isItalic: item.isItalic, isHorizontal: item.isHorizontal,
+      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, baselineY: startY, isBold: item.isBold, isItalic: item.isItalic, isHorizontal: item.isHorizontal,
       x1: Math.min(...points.map((point) => point[0])), y1: Math.min(...points.map((point) => point[1])),
       x2: Math.max(...points.map((point) => point[0])), y2: Math.max(...points.map((point) => point[1])),
     };
@@ -207,7 +207,9 @@ function liftPdfTextRegions(tokens, regions, visuals) {
 function tokenRows(tokens) {
   const rows = [];
   for (const token of tokens.slice().sort((a, b) => centerY(a) - centerY(b) || a.y1 - b.y1 || a.x1 - b.x1)) {
-    const row = rows.find((candidate) => Math.abs(centerY(token) - candidate.centerY) <= Math.max(2, Math.min(height(token), candidate.medianHeight) * 0.65) || verticalOverlap(token, candidate) >= 0.5);
+    const row = rows.find((candidate) => Math.abs(centerY(token) - candidate.centerY) <= Math.max(2, Math.min(height(token), candidate.medianHeight) * 0.65)
+      || verticalOverlap(token, candidate) >= 0.5
+      || Math.abs(token.baselineY - candidate.medianBaseline) <= Math.max(token.fontSize, candidate.medianFontSize) * 0.45);
     if (row) { row.tokens.push(token); updateRow(row); }
     else { const created = { tokens: [token] }; updateRow(created); rows.push(created); }
   }
@@ -215,6 +217,11 @@ function tokenRows(tokens) {
 }
 
 function joinRowTokens(tokens) {
+  const fontSizes = tokens.map((token) => token.fontSize).sort((a, b) => a - b);
+  const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] || 1;
+  const normalTokens = tokens.filter((token) => token.fontSize >= medianFontSize * 0.9);
+  const baselines = (normalTokens.length ? normalTokens : tokens).map((token) => token.baselineY).sort((a, b) => a - b);
+  const baseline = baselines[Math.floor(baselines.length / 2)] || 0;
   let text = "";
   let previous = null;
   for (const token of tokens) {
@@ -223,7 +230,9 @@ function joinRowTokens(tokens) {
       const fontSize = Math.max(1, Math.min(previous.fontSize || 1, token.fontSize || 1));
       if (gap > fontSize * 0.16) text += " ";
     }
-    text += token.text;
+    const isSuperscript = token.fontSize <= medianFontSize * 0.85
+      && token.baselineY <= baseline - medianFontSize * 0.12;
+    text += isSuperscript ? `\uE100${token.text}\uE101` : token.text;
     previous = token;
   }
   return text;
@@ -236,6 +245,10 @@ function updateRow(row) {
   row.centerY = row.tokens.reduce((sum, token) => sum + centerY(token) * height(token), 0) / row.tokens.reduce((sum, token) => sum + height(token), 0);
   const heights = row.tokens.map(height).sort((a, b) => a - b);
   row.medianHeight = heights[Math.floor(heights.length / 2)];
+  const baselines = row.tokens.map((token) => token.baselineY).sort((a, b) => a - b);
+  const fontSizes = row.tokens.map((token) => token.fontSize).sort((a, b) => a - b);
+  row.medianBaseline = baselines[Math.floor(baselines.length / 2)];
+  row.medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)];
 }
 
 function fontAscent(style, fontHeight) {

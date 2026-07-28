@@ -57,6 +57,7 @@ export async function getLocalYouTubeTranscript(videoId) {
 
 export function youtubeTranscriptArticle(transcript, sourceUrl) {
   const passages = transcriptPassages(transcript.chunks, transcript.chapters, transcript.language);
+  const paragraphSentenceStarts = timedParagraphSentences(passages, transcript.chunks, transcript.language);
   const content = passages.map((passage) => passage.type === "heading"
     ? `<h2>${escapeHtml(passage.text)}</h2>`
     : `<p>${escapeHtml(passage.text)}</p>`).join("\n");
@@ -75,7 +76,25 @@ export function youtubeTranscriptArticle(transcript, sourceUrl) {
     videoId: transcript.videoId,
     duration: transcript.duration,
     chapters: transcript.chapters,
+    paragraphSentenceStarts,
   };
+}
+
+function timedParagraphSentences(passages, chunks, language) {
+  const timedWords = chunks.flatMap((chunk) => (chunk.text.replace(/>>/g, " ").match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) || [])
+    .map((word) => ({ word: word.toLocaleLowerCase(), start: chunk.start })));
+  let wordCursor = 0;
+  return passages.filter((passage) => passage.type === "paragraph").map((passage) => {
+    return segmentTranscriptSentences(passage.text, language).map((sentence) => {
+      const words = sentence.replace(/^—\s*/u, "").match(/[\p{L}\p{N}]+(?:['’][\p{L}\p{N}]+)*/gu) || [];
+      const firstWord = words[0]?.toLocaleLowerCase();
+      let found = firstWord ? timedWords.findIndex((entry, index) => index >= wordCursor && entry.word === firstWord) : -1;
+      if (found < 0) found = Math.min(wordCursor, Math.max(0, timedWords.length - 1));
+      const start = timedWords[found]?.start ?? 0;
+      wordCursor = Math.min(timedWords.length, found + Math.max(1, words.length));
+      return start;
+    });
+  });
 }
 
 function timedTextChunks(xml) {

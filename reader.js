@@ -2,6 +2,7 @@ import { InflectTTS } from "./inflect-tts.js";
 import { PocketTTS } from "./pocket-tts.js";
 import { marked } from "./dist/marked.esm.js";
 import { renderMath } from "./dist/katex-render.js";
+import { linkMatches } from "./dist/linkify.js";
 import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
 import { embedTexts } from "./embedding-client.js";
 
@@ -17,6 +18,7 @@ let documentReady = false;
 let summaryStarted = false;
 let summaryPreference = "auto";
 let activeDocumentId = "";
+let activeSourceUrl = "";
 
 function dataUrl(blob) {
   return new Promise((resolve, reject) => {
@@ -480,12 +482,13 @@ function pdfBlockPassages(pages) {
         passages.push({ type: block.latex ? "formula" : "image", text: "", latex: block.latex || "", image: { src, alt: block.label || "PDF visual", width: block.width, height: block.height }, page: page.page, layout: block.layout });
         continue;
       }
-      const text = normalizePdfTypography(String(block.text || ""))
+      const markedText = normalizePdfTypography(String(block.text || ""))
         .replace(/-\n(?=\p{Ll})/gu, "")
         .replace(/\s*\n\s*/g, " ")
         .replace(/\s+([,.;:!?%)\]])/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
+      const { text, superscriptRanges } = extractPdfSuperscripts(markedText);
       if (!text) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
@@ -494,6 +497,7 @@ function pdfBlockPassages(pages) {
       passages.push({
         type: isHeading ? "heading" : "paragraph",
         text,
+        superscriptRanges,
         pdfText: true,
         headingLevel: isTitle ? 1 : isHeading ? 2 : null,
         isBold: Boolean(block.isBold),
@@ -520,7 +524,14 @@ function mergePdfColumnContinuations(passages) {
     const sentenceContinues = sameTextFlow && (!/[.!?…:;][”’"')\]]?$/u.test(previous.text) || /^\p{Ll}/u.test(passage.text));
     if (jumpsToNextColumn && sentenceContinues) {
       const hyphenated = /-$/u.test(previous.text) && /^\p{Ll}/u.test(passage.text);
-      previous.text = `${previous.text.replace(hyphenated ? /-$/u : /$/u, "")}${hyphenated ? "" : " "}${passage.text}`;
+      const prefix = previous.text.replace(hyphenated ? /-$/u : /$/u, "");
+      const separator = hyphenated ? "" : " ";
+      const rangeOffset = prefix.length + separator.length;
+      previous.text = `${prefix}${separator}${passage.text}`;
+      previous.superscriptRanges = [
+        ...(previous.superscriptRanges || []).filter((range) => range.end <= prefix.length),
+        ...(passage.superscriptRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+      ];
       previous.layout = { ...previous.layout, x2: Math.max(previous.layout.x2, passage.layout.x2), y2: Math.max(previous.layout.y2, passage.layout.y2) };
       continue;
     }
@@ -529,17 +540,37 @@ function mergePdfColumnContinuations(passages) {
   return merged;
 }
 
+function extractPdfSuperscripts(markedText) {
+  let text = "";
+  const superscriptRanges = [];
+  let superscriptStart = null;
+  for (const character of markedText) {
+    if (character === "\uE100") {
+      if (superscriptStart === null) superscriptStart = text.length;
+    } else if (character === "\uE101") {
+      if (superscriptStart !== null && text.length > superscriptStart) superscriptRanges.push({ start: superscriptStart, end: text.length });
+      superscriptStart = null;
+    } else text += character;
+  }
+  if (superscriptStart !== null && text.length > superscriptStart) superscriptRanges.push({ start: superscriptStart, end: text.length });
+  return { text, superscriptRanges };
+}
+
 function removeRepeatedPdfMarginals(passages) {
   const pagesByText = new Map();
-  const marginalKey = (passage) => {
+  const marginalPosition = (passage) => {
     if (!passage.pdfText || !Number.isInteger(passage.page) || !passage.layout) return "";
     const { y1, y2, pageHeight } = passage.layout;
     if (!(Number.isFinite(y1) && Number.isFinite(y2) && pageHeight > 0)) return "";
-    const inTopMargin = y2 <= pageHeight * 0.12;
-    const inBottomMargin = y1 >= pageHeight * 0.88;
-    if (!inTopMargin && !inBottomMargin) return "";
+    if (y2 <= pageHeight * 0.12) return "top";
+    if (y1 >= pageHeight * 0.88) return "bottom";
+    return "";
+  };
+  const marginalKey = (passage) => {
+    const position = marginalPosition(passage);
+    if (!position) return "";
     const text = passage.text.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase();
-    return text.length >= 4 && text.length <= 240 ? `${inTopMargin ? "top" : "bottom"}:${text}` : "";
+    return text.length >= 4 && text.length <= 240 ? `${position}:${text}` : "";
   };
   for (const passage of passages) {
     const key = marginalKey(passage);
@@ -548,7 +579,17 @@ function removeRepeatedPdfMarginals(passages) {
     pagesByText.get(key).add(passage.page);
   }
   const repeated = new Set([...pagesByText].filter(([, pages]) => pages.size >= 2).map(([key]) => key));
-  return repeated.size ? passages.filter((passage) => !repeated.has(marginalKey(passage))) : passages;
+  return passages.filter((passage) => {
+    if (repeated.has(marginalKey(passage))) return false;
+    const position = marginalPosition(passage);
+    const text = passage.text?.replace(/\s+/g, " ").trim() || "";
+    const protectedContent = passage.headingLevel === 1 || ["Title", "Section-header", "Caption"].includes(passage.layoutLabel);
+    const likelyRunningHeaderOrFooter = position && !protectedContent
+      && ["Text", "Footnote"].includes(passage.layoutLabel)
+      && text.length >= 1
+      && text.length <= 120;
+    return !likelyRunningHeaderOrFooter;
+  });
 }
 
 const PDF_PREPOSED_DIACRITICS = new Map([
@@ -736,45 +777,46 @@ function appendPdfCitationText(container, text, references, isReferenceEntry) {
   appendLinkifiedPdfText(container, text.slice(offset));
 }
 
-const PDF_URL_PATTERN = /(?:https?:\/\/|www\.)[^\s<>{}\[\]]+|(?<![@\w])(?:[a-z0-9](?:[a-z0-9-]{0,62}[a-z0-9])?\.)+[a-z]{2,24}(?:\/[^\s<>{}\[\]]*)?/giu;
-
 function appendLinkifiedPdfText(container, text) {
   let offset = 0;
-  for (const match of text.matchAll(PDF_URL_PATTERN)) {
-    container.append(document.createTextNode(text.slice(offset, match.index)));
-    const trailing = match[0].match(/[.,;:!?)}\]]+$/u)?.[0] || "";
-    const label = trailing ? match[0].slice(0, -trailing.length) : match[0];
-    const href = /^https?:\/\//iu.test(label) ? label : `https://${label}`;
+  for (const match of linkMatches(text)) {
+    container.append(document.createTextNode(text.slice(offset, match.start)));
     try {
       const link = document.createElement("a");
       link.className = "pdf-external-link";
-      link.href = new URL(href).href;
+      link.href = match.href;
       link.target = "_blank";
       link.rel = "noopener noreferrer";
-      link.textContent = label;
-      link.title = `Open ${new URL(href).hostname}`;
+      link.textContent = match.label;
+      link.title = match.schema === "mailto:" ? `Email ${match.label}` : `Open ${new URL(match.href).hostname}`;
       container.append(link);
     } catch {
-      container.append(document.createTextNode(label));
+      container.append(document.createTextNode(match.label));
     }
-    if (trailing) container.append(document.createTextNode(trailing));
-    offset = match.index + match[0].length;
+    offset = match.end;
   }
   container.append(document.createTextNode(text.slice(offset)));
 }
 
 function textForSpeech(text) {
-  return text.replace(PDF_URL_PATTERN, (source) => {
-    const label = source.replace(/[.,;:!?)}\]]+$/u, "");
-    const trailing = source.slice(label.length);
+  let spoken = "";
+  let offset = 0;
+  for (const match of linkMatches(text)) {
+    spoken += text.slice(offset, match.start);
     try {
-      const url = new URL(/^https?:\/\//iu.test(label) ? label : `https://${label}`);
-      const hostname = url.hostname.replace(/^www\./iu, "").split(".").filter(Boolean).join(" dot ");
-      return `${hostname}${trailing}`;
+      if (match.schema === "mailto:") {
+        const [user, domain] = match.label.split("@");
+        spoken += `${user} at ${domain.split(".").join(" dot ")}`;
+      } else {
+        const url = new URL(match.href);
+        spoken += url.hostname.replace(/^www\./iu, "").split(".").filter(Boolean).join(" dot ");
+      }
     } catch {
-      return source;
+      spoken += match.label;
     }
-  });
+    offset = match.end;
+  }
+  return spoken + text.slice(offset);
 }
 
 function normalizeTTSTextForEngine(text) {
@@ -783,21 +825,34 @@ function normalizeTTSTextForEngine(text) {
     .replace(/[\u201C\u201D]/gu, "");
 }
 
-function associatePdfFigures(passages) {
+function associatePdfVisuals(passages) {
   const figures = new Set();
-  for (const passage of passages) delete passage.figureNumber;
-  for (const caption of passages) {
-    const match = caption.pdfText ? caption.text.match(/^\s*(?:Figure|Fig\.?)[\s ]+(\d+[A-Za-z]?)/iu) : null;
-    if (!match) continue;
-    const number = match[1].toLowerCase();
-    const candidates = passages.filter((passage) => passage.type === "image" && passage.page === caption.page && passage.layout && !passage.figureNumber);
-    if (!candidates.length) continue;
-    const image = candidates.sort((left, right) => figureCaptionDistance(left.layout, caption.layout) - figureCaptionDistance(right.layout, caption.layout))[0];
-    image.figureNumber = number;
-    caption.figureCaptionNumber = number;
-    figures.add(number);
+  const tables = new Set();
+  for (const passage of passages) {
+    delete passage.figureNumber;
+    delete passage.tableNumber;
+    delete passage.visualCaption;
   }
-  return figures;
+  for (const caption of passages) {
+    const match = caption.pdfText ? caption.text.match(/^\s*(Figure|Fig\.?|Table)[\s ]+(\d+[A-Za-z]?)/iu) : null;
+    if (!match) continue;
+    const kind = /^table$/iu.test(match[1]) ? "table" : "figure";
+    const number = match[2].toLowerCase();
+    const candidates = passages.filter((passage) => {
+      const matchingVisual = kind === "figure"
+        ? passage.type === "image" && !/^table$/iu.test(passage.image?.alt || "")
+        : passage.type === "table" || (passage.type === "image" && /^table$/iu.test(passage.image?.alt || ""));
+      return matchingVisual && passage.page === caption.page && passage.layout
+        && !(kind === "figure" ? passage.figureNumber : passage.tableNumber);
+    });
+    if (!candidates.length) continue;
+    const visual = candidates.sort((left, right) => figureCaptionDistance(left.layout, caption.layout) - figureCaptionDistance(right.layout, caption.layout))[0];
+    visual[kind === "figure" ? "figureNumber" : "tableNumber"] = number;
+    visual.visualCaption = caption.text;
+    caption[kind === "figure" ? "figureCaptionNumber" : "tableCaptionNumber"] = number;
+    (kind === "figure" ? figures : tables).add(number);
+  }
+  return { figures, tables };
 }
 
 function figureCaptionDistance(image, caption) {
@@ -808,18 +863,19 @@ function figureCaptionDistance(image, caption) {
   return verticalGap + horizontalGap * 0.5 + captionBelowBonus;
 }
 
-function appendPdfLinkedText(container, text, references, figures, isReferenceEntry) {
-  const pattern = /\b(?:Figure|Fig\.?)\s+(\d+[A-Za-z]?)\b/giu;
+function appendPdfLinkedText(container, text, references, visuals, isReferenceEntry) {
+  const pattern = /\b(Figure|Fig\.?|Table)\s+(\d+[A-Za-z]?)\b/giu;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
     appendPdfCitationText(container, text.slice(offset, match.index), references, isReferenceEntry);
-    const number = match[1].toLowerCase();
-    if (figures.has(number)) {
+    const kind = /^table$/iu.test(match[1]) ? "table" : "figure";
+    const number = match[2].toLowerCase();
+    if (visuals[`${kind}s`].has(number)) {
       const link = document.createElement("a");
-      link.className = "pdf-citation pdf-figure-link";
-      link.href = `#pdf-figure-${number}`;
+      link.className = `pdf-citation pdf-visual-link pdf-${kind}-link`;
+      link.href = `#pdf-${kind}-${number}`;
       link.textContent = match[0];
-      link.title = `Jump to Figure ${match[1]}`;
+      link.title = `Jump to ${kind} ${match[2]}`;
       container.append(link);
     } else container.append(document.createTextNode(match[0]));
     offset = match.index + match[0].length;
@@ -827,15 +883,50 @@ function appendPdfLinkedText(container, text, references, figures, isReferenceEn
   appendPdfCitationText(container, text.slice(offset), references, isReferenceEntry);
 }
 
+function appendPdfStyledText(container, text, textStart, superscriptRanges, references, visuals, isReferenceEntry) {
+  const textEnd = textStart + text.length;
+  const boundaries = new Set([0, text.length]);
+  for (const range of superscriptRanges || []) {
+    if (range.end <= textStart || range.start >= textEnd) continue;
+    boundaries.add(Math.max(0, range.start - textStart));
+    boundaries.add(Math.min(text.length, range.end - textStart));
+  }
+  const offsets = [...boundaries].sort((left, right) => left - right);
+  for (let index = 0; index < offsets.length - 1; index += 1) {
+    const start = offsets[index];
+    const end = offsets[index + 1];
+    if (end <= start) continue;
+    const segment = text.slice(start, end);
+    const isSuperscript = (superscriptRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
+    const target = isSuperscript ? document.createElement("sup") : container;
+    appendPdfLinkedText(target, segment, references, visuals, isReferenceEntry);
+    if (isSuperscript) container.append(target);
+  }
+}
+
 function showCitationPreview(citation) {
   const hash = citation.getAttribute("href");
-  if (!hash?.startsWith("#pdf-ref-")) return;
+  if (!hash?.startsWith("#pdf-")) return;
   const target = document.querySelector(hash);
   if (!target) return;
   const preview = $("#citationPreview");
-  const number = hash.slice("#pdf-ref-".length);
-  preview.querySelector("strong").textContent = `Reference ${number}`;
-  preview.querySelector("p").textContent = target.textContent.trim();
+  const visualMatch = hash.match(/^#pdf-(figure|table)-(.+)$/u);
+  const media = preview.querySelector(".citation-preview-media");
+  const description = preview.querySelector("p");
+  media.replaceChildren();
+  if (visualMatch) {
+    preview.querySelector("strong").textContent = `${visualMatch[1]} ${visualMatch[2]}`;
+    const visual = target.querySelector(visualMatch[1] === "table" ? ":scope > table, :scope > img" : ":scope > img");
+    if (visual) media.append(visual.cloneNode(true));
+    media.hidden = !visual;
+    description.textContent = target.dataset.previewCaption || "";
+  } else {
+    const number = hash.slice("#pdf-ref-".length);
+    preview.querySelector("strong").textContent = `Reference ${number}`;
+    media.hidden = true;
+    description.textContent = target.textContent.trim();
+  }
+  description.hidden = !description.textContent;
   preview.hidden = false;
   const linkRect = citation.getBoundingClientRect();
   const previewRect = preview.getBoundingClientRect();
@@ -855,8 +946,40 @@ function hideCitationPreview(citation) {
   citation?.removeAttribute("aria-describedby");
 }
 
+function associatePdfReferences(passages) {
+  const entries = new Map();
+  let inBibliography = false;
+  const bibliographyHeading = /^\s*(?:\d+(?:\.\d+)*[.)]?\s+)?(?:references(?:\s+and\s+notes)?|bibliography|works\s+cited)\s*:?[\s.]*$/iu;
+  const bracketedEntry = /^\s*\[(\d{1,3})\](?:\s|$)/u;
+  const numberedEntry = /^\s*(\d{1,3})[.)](?:\s|$)/u;
+
+  passages.forEach((passage) => {
+    if (!passage.pdfText || !passage.text) return;
+    if (bibliographyHeading.test(passage.text)) {
+      inBibliography = true;
+      return;
+    }
+    const bracketed = passage.text.match(bracketedEntry)?.[1];
+    const numbered = inBibliography ? passage.text.match(numberedEntry)?.[1] : null;
+    if (bracketed || numbered) entries.set(passage, bracketed || numbered);
+  });
+
+  if (![...entries.values()].some((number) => passages.findIndex((passage) => entries.get(passage) === number) >= passages.length * 0.6)) {
+    const tailCandidates = passages.slice(Math.floor(passages.length * 0.6))
+      .map((passage) => ({ passage, number: passage.pdfText ? Number(passage.text.match(numberedEntry)?.[1]) : NaN }))
+      .filter(({ number }) => Number.isInteger(number));
+    const sequential = tailCandidates.length >= 2
+      && tailCandidates[0].number <= 3
+      && tailCandidates.every((candidate, index) => index === 0 || candidate.number > tailCandidates[index - 1].number);
+    if (sequential) tailCandidates.forEach(({ passage, number }) => entries.set(passage, String(number)));
+  }
+
+  return { entries, numbers: new Set(entries.values()) };
+}
+
 function render(metadata, passages, sourceUrl) {
   const article = $("#article");
+  activeSourceUrl = sourceUrl;
   article.replaceChildren();
   try { article.classList.toggle("youtube-transcript", /^(?:www\.|m\.)?youtube\.com$/i.test(new URL(sourceUrl).hostname)); }
   catch { article.classList.remove("youtube-transcript"); }
@@ -868,11 +991,9 @@ function render(metadata, passages, sourceUrl) {
   }
   const details = [metadata.author, metadata.site, metadata.published?.slice(0, 10)].filter(Boolean);
   if (details.length) { const byline = document.createElement("p"); byline.className = "byline"; byline.textContent = details.join(" · "); article.append(byline); }
-  const references = new Set(passages
-    .filter((passage) => passage.pdfText)
-    .map((passage) => passage.text.match(/^\s*\[(\d+)\](?:\s|$)/)?.[1])
-    .filter(Boolean));
-  const figures = associatePdfFigures(passages);
+  const referenceIndex = associatePdfReferences(passages);
+  const references = referenceIndex.numbers;
+  const visuals = associatePdfVisuals(passages);
   passages.forEach((passage, index) => {
     if (!metadata.hideTitle && index === 0 && passage.type === "heading" && passage.text === title) return;
     const element = document.createElement(passage.type === "heading" ? (passage.headingLevel === 1 ? "h1" : "h2") : ["image", "formula"].includes(passage.type) ? "figure" : passage.type === "table" ? "section" : "p");
@@ -884,9 +1005,11 @@ function render(metadata, passages, sourceUrl) {
       element.classList.toggle("pdf-italic", Boolean(passage.isItalic));
     }
     element.dataset.index = index;
-    const referenceNumber = passage.pdfText ? passage.text.match(/^\s*\[(\d+)\](?:\s|$)/)?.[1] : null;
+    const referenceNumber = referenceIndex.entries.get(passage) || null;
     if (referenceNumber) element.id = `pdf-ref-${referenceNumber}`;
     if (passage.figureNumber) element.id = `pdf-figure-${passage.figureNumber}`;
+    if (passage.tableNumber) element.id = `pdf-table-${passage.tableNumber}`;
+    if (passage.visualCaption) element.dataset.previewCaption = passage.visualCaption;
     if (passage.type === "table") {
       const table = document.createElement("table");
       for (const row of passage.table.rows) {
@@ -930,6 +1053,7 @@ function render(metadata, passages, sourceUrl) {
       image.loading = "lazy";
       element.append(image);
     }
+    let passageTextOffset = 0;
     passage.sentences.forEach((sentence, sentenceIndex) => {
       if (["image", "formula", "table"].includes(passage.type) && sentenceIndex === 0) element.append(document.createElement("br"));
       else if (sentenceIndex) element.append(" ");
@@ -938,8 +1062,17 @@ function render(metadata, passages, sourceUrl) {
       span.dataset.sentence = sentenceIndex;
       span.tabIndex = 0;
       span.setAttribute("role", "button");
-      span.title = "Read from this sentence";
-      if (passage.pdfText) appendPdfLinkedText(span, sentence, references, figures, Boolean(referenceNumber));
+      const youtubeStart = passage.youtubeSentenceStarts?.[sentenceIndex];
+      if (Number.isFinite(youtubeStart)) {
+        span.dataset.youtubeStart = youtubeStart;
+        span.classList.add("youtube-sentence");
+        span.title = `Play the video from ${formatVideoTime(youtubeStart)}`;
+      } else span.title = "Read from this sentence";
+      const sentenceTextOffset = passage.pdfText ? passage.text.indexOf(sentence, passageTextOffset) : -1;
+      if (passage.pdfText) {
+        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, references, visuals, Boolean(referenceNumber));
+        passageTextOffset = Math.max(passageTextOffset, sentenceTextOffset + sentence.length);
+      }
       else span.textContent = sentence;
       element.append(span);
     });
@@ -1005,6 +1138,11 @@ async function readArticle() {
 function readFromPosition(index, sentenceIndex = 0) {
   const passage = state.passages[index];
   if (!passage || !Number.isInteger(sentenceIndex) || sentenceIndex < 0 || sentenceIndex >= passage.sentences.length) return;
+  const youtubeStart = passage.youtubeSentenceStarts?.[sentenceIndex];
+  if (Number.isFinite(youtubeStart)) {
+    void playYouTubeAt(youtubeStart);
+    return;
+  }
   state.run++;
   state.reading = false;
   state.index = index;
@@ -1013,6 +1151,48 @@ function readFromPosition(index, sentenceIndex = 0) {
   pocketTts.stop();
   markCurrent(index, sentenceIndex);
   void readArticle();
+}
+
+function formatVideoTime(milliseconds) {
+  const totalSeconds = Math.max(0, Math.floor(milliseconds / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = String(totalSeconds % 60).padStart(2, "0");
+  return `${minutes}:${seconds}`;
+}
+
+async function playYouTubeAt(milliseconds) {
+  const seconds = Math.max(0, milliseconds / 1000);
+  let videoId = "";
+  try { videoId = new URL(activeSourceUrl).searchParams.get("v") || ""; } catch {}
+  try {
+    const tabs = await chrome.tabs.query({ url: ["https://www.youtube.com/watch*", "https://m.youtube.com/watch*"] });
+    const tab = tabs.find((candidate) => {
+      try { return new URL(candidate.url).searchParams.get("v") === videoId; } catch { return false; }
+    });
+    if (tab?.id) {
+      const [{ result: played } = {}] = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        func: async (time) => {
+          const video = document.querySelector("video");
+          if (!video) return false;
+          video.currentTime = time;
+          try { await video.play(); } catch {}
+          return true;
+        },
+        args: [seconds],
+      });
+      if (played) {
+        await chrome.tabs.update(tab.id, { active: true });
+        setStatus({ state: "ready", message: `Playing YouTube from ${formatVideoTime(milliseconds)}` });
+        return;
+      }
+    }
+  } catch (error) {
+    console.warn("Could not seek the existing YouTube tab:", error);
+  }
+  const url = new URL(activeSourceUrl);
+  url.searchParams.set("t", `${Math.floor(seconds)}s`);
+  await chrome.tabs.create({ url: url.href });
 }
 
 function stopReading() {
@@ -1109,7 +1289,12 @@ async function loadArticle() {
     published: article.publishedTime,
     word_count: Math.round((article.textContent || "").trim().split(/\s+/).length),
   };
-  state.passages = htmlPassages(article.content, sourceUrl).map((passage) => ({ ...passage, sentences: passage.text ? sentences(passage.text) : [] }));
+  let youtubeParagraphIndex = 0;
+  state.passages = htmlPassages(article.content, sourceUrl).map((passage) => {
+    const prepared = { ...passage, sentences: passage.text ? sentences(passage.text) : [] };
+    if (article.kind === "youtube" && passage.type === "paragraph") prepared.youtubeSentenceStarts = article.paragraphSentenceStarts?.[youtubeParagraphIndex++] || [];
+    return prepared;
+  });
   if (!state.passages.length) throw new Error("No readable article text was found.");
   render(metadata, state.passages, sourceUrl);
   $("#play").disabled = false;
@@ -1200,19 +1385,19 @@ $("#article").addEventListener("click", (event) => {
   readFromPosition(Number(passage.dataset.index), sentence ? Number(sentence.dataset.sentence) : 0);
 });
 $("#article").addEventListener("mouseover", (event) => {
-  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-']");
   if (citation && !citation.contains(event.relatedTarget)) showCitationPreview(citation);
 });
 $("#article").addEventListener("mouseout", (event) => {
-  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-']");
   if (citation && !citation.contains(event.relatedTarget)) hideCitationPreview(citation);
 });
 $("#article").addEventListener("focusin", (event) => {
-  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-']");
   if (citation) showCitationPreview(citation);
 });
 $("#article").addEventListener("focusout", (event) => {
-  const citation = event.target.closest("a.pdf-citation[href^='#pdf-ref-']");
+  const citation = event.target.closest("a.pdf-citation[href^='#pdf-']");
   if (citation) hideCitationPreview(citation);
 });
 $("#article").addEventListener("keydown", (event) => {
