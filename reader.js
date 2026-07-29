@@ -729,7 +729,10 @@ function pdfBlockPassages(pages) {
 function mergePdfColumnContinuations(passages) {
   const merged = [];
   for (const passage of passages) {
-    const previous = merged.at(-1);
+    let previousIndex = merged.length - 1;
+    while (previousIndex >= 0 && isPdfVisualInterruption(merged[previousIndex])) previousIndex -= 1;
+    const previous = merged[previousIndex];
+    const crossedVisuals = previousIndex >= 0 && previousIndex < merged.length - 1;
     const adjacentPages = previous && Number.isInteger(previous.page) && Number.isInteger(passage.page)
       && passage.page >= previous.page && passage.page <= previous.page + 1;
     const sameTextFlow = previous?.type === "paragraph" && passage.type === "paragraph" && adjacentPages
@@ -744,8 +747,11 @@ function mergePdfColumnContinuations(passages) {
     const previousSentenceFinished = /[.!?…:;][”’"')\]]?$/u.test(previousWithoutTrailingCitations);
     const crossesPage = sameTextFlow && passage.page === previous.page + 1;
     const sentenceContinues = startsMidSentence || !previousSentenceFinished;
-    if (sentenceContinues && (jumpsToNextColumn || startsMidSentence && (samePage || crossesPage))) {
-      const hyphenated = /-$/u.test(previous.text) && /^\p{Ll}/u.test(passage.text);
+    const hyphenated = /-$/u.test(previous?.text || "") && /^\p{Ll}/u.test(passage.text);
+    const uninterruptedContinuation = !crossedVisuals
+      && sentenceContinues && (jumpsToNextColumn || startsMidSentence && (samePage || crossesPage));
+    const interruptedPageHyphen = crossedVisuals && crossesPage && startsMidSentence && hyphenated;
+    if (uninterruptedContinuation || interruptedPageHyphen) {
       const prefix = previous.text.replace(hyphenated ? /-$/u : /$/u, "");
       const separator = hyphenated ? "" : " ";
       const rangeOffset = prefix.length + separator.length;
@@ -768,6 +774,13 @@ function mergePdfColumnContinuations(passages) {
     merged.push(passage);
   }
   return merged;
+}
+
+function isPdfVisualInterruption(passage) {
+  if (["image", "table", "formula"].includes(passage?.type)) return true;
+  if (!passage?.pdfText) return false;
+  return passage.layoutLabel === "Caption"
+    || /^\s*(?:Figure|Fig\.?|Table)\s+\d+[A-Za-z]?\b/iu.test(passage.text || "");
 }
 
 function extractPdfInlineStyles(markedText) {
@@ -1331,13 +1344,6 @@ function render(metadata, passages, sourceUrl) {
       math.innerHTML = renderMath(passage.latex);
       math.title = passage.latex;
       element.append(math);
-      const details = document.createElement("details");
-      const summary = document.createElement("summary");
-      summary.textContent = "LaTeX";
-      const code = document.createElement("code");
-      code.textContent = passage.latex;
-      details.append(summary, code);
-      element.append(details);
     } else if (passage.type === "image") {
       const image = document.createElement("img");
       image.src = passage.image.src;

@@ -86,10 +86,10 @@ article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.
 .passage.image { margin:28px 0 34px; padding:0; text-align:center; background:transparent; box-shadow:none; }
 .passage.image img { display:block; width:auto; max-width:100%; max-height:72vh; margin:0 auto 10px; border-radius:10px; box-shadow:0 8px 30px color-mix(in srgb,var(--ink) 16%,transparent); }
 .passage.image .sentence { display:inline-block; color:var(--muted); font-size:13px; font-style:italic; }
-.passage.formula { margin:28px 0 34px; padding:18px; overflow:auto; cursor:default; text-align:center; background:var(--surface); border:1px solid var(--line); }
+.passage.formula { margin:14px 0 18px; padding:6px 8px; overflow:auto; cursor:default; text-align:center; background:var(--paper); border:0; box-shadow:none; }
+.passage.formula:hover, .passage.formula.current { background:var(--paper); box-shadow:none; }
+.math-render, .math-render .katex, .math-render .katex-display, .math-render .katex-html { background:transparent !important; }
 .math-render { font-size:1.08em; overflow:auto hidden; }
-.passage.formula details { margin-top:10px; color:var(--muted); font-size:11px; text-align:left; }
-.passage.formula code { display:block; padding:8px 0; white-space:pre-wrap; overflow-wrap:anywhere; }
 .passage.table { margin:28px 0 34px; padding:0; overflow:auto; cursor:default; }
 .passage.table table { width:100%; border-collapse:collapse; font-size:14px; line-height:1.4; background:var(--surface); }
 .passage.table th, .passage.table td { min-width:70px; padding:8px 10px; border:1px solid var(--line); text-align:left; vertical-align:top; }
