@@ -701,7 +701,7 @@ function pdfBlockPassages(pages) {
         .replace(/\s+([,.;:!?%)\]])/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
-      const { text, superscriptRanges } = extractPdfSuperscripts(markedText);
+      const { text, superscriptRanges, subscriptRanges, mathRanges } = extractPdfInlineStyles(markedText);
       if (!text) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
@@ -711,6 +711,8 @@ function pdfBlockPassages(pages) {
         type: isHeading ? "heading" : "paragraph",
         text,
         superscriptRanges,
+        subscriptRanges,
+        mathRanges,
         pdfText: true,
         headingLevel: isTitle ? 1 : isHeading ? 2 : null,
         isBold: Boolean(block.isBold),
@@ -752,6 +754,14 @@ function mergePdfColumnContinuations(passages) {
         ...(previous.superscriptRanges || []).filter((range) => range.end <= prefix.length),
         ...(passage.superscriptRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
       ];
+      previous.subscriptRanges = [
+        ...(previous.subscriptRanges || []).filter((range) => range.end <= prefix.length),
+        ...(passage.subscriptRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+      ];
+      previous.mathRanges = [
+        ...(previous.mathRanges || []).filter((range) => range.end <= prefix.length),
+        ...(passage.mathRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+      ];
       previous.layout = { ...previous.layout, x2: Math.max(previous.layout.x2, passage.layout.x2), y2: Math.max(previous.layout.y2, passage.layout.y2) };
       continue;
     }
@@ -760,20 +770,28 @@ function mergePdfColumnContinuations(passages) {
   return merged;
 }
 
-function extractPdfSuperscripts(markedText) {
+function extractPdfInlineStyles(markedText) {
   let text = "";
-  const superscriptRanges = [];
-  let superscriptStart = null;
+  const definitions = [
+    { open: "\uE100", close: "\uE101", ranges: [], start: null },
+    { open: "\uE102", close: "\uE103", ranges: [], start: null },
+    { open: "\uE104", close: "\uE105", ranges: [], start: null },
+  ];
   for (const character of markedText) {
-    if (character === "\uE100") {
-      if (superscriptStart === null) superscriptStart = text.length;
-    } else if (character === "\uE101") {
-      if (superscriptStart !== null && text.length > superscriptStart) superscriptRanges.push({ start: superscriptStart, end: text.length });
-      superscriptStart = null;
-    } else text += character;
+    const opening = definitions.find((definition) => definition.open === character);
+    if (opening) { if (opening.start === null) opening.start = text.length; continue; }
+    const closing = definitions.find((definition) => definition.close === character);
+    if (closing) {
+      if (closing.start !== null && text.length > closing.start) closing.ranges.push({ start: closing.start, end: text.length });
+      closing.start = null;
+      continue;
+    }
+    text += character;
   }
-  if (superscriptStart !== null && text.length > superscriptStart) superscriptRanges.push({ start: superscriptStart, end: text.length });
-  return { text, superscriptRanges };
+  for (const definition of definitions) {
+    if (definition.start !== null && text.length > definition.start) definition.ranges.push({ start: definition.start, end: text.length });
+  }
+  return { text, superscriptRanges: definitions[0].ranges, subscriptRanges: definitions[1].ranges, mathRanges: definitions[2].ranges };
 }
 
 function removeRepeatedPdfMarginals(passages) {
@@ -1131,13 +1149,15 @@ function appendPdfLinkedText(container, text, references, visuals, isReferenceEn
   appendPdfCitationText(container, text.slice(offset), references, isReferenceEntry);
 }
 
-function appendPdfStyledText(container, text, textStart, superscriptRanges, references, visuals, isReferenceEntry) {
+function appendPdfStyledText(container, text, textStart, superscriptRanges, subscriptRanges, mathRanges, references, visuals, isReferenceEntry) {
   const textEnd = textStart + text.length;
   const boundaries = new Set([0, text.length]);
-  for (const range of superscriptRanges || []) {
-    if (range.end <= textStart || range.start >= textEnd) continue;
-    boundaries.add(Math.max(0, range.start - textStart));
-    boundaries.add(Math.min(text.length, range.end - textStart));
+  for (const ranges of [superscriptRanges, subscriptRanges, mathRanges]) {
+    for (const range of ranges || []) {
+      if (range.end <= textStart || range.start >= textEnd) continue;
+      boundaries.add(Math.max(0, range.start - textStart));
+      boundaries.add(Math.min(text.length, range.end - textStart));
+    }
   }
   const offsets = [...boundaries].sort((left, right) => left - right);
   for (let index = 0; index < offsets.length - 1; index += 1) {
@@ -1146,9 +1166,14 @@ function appendPdfStyledText(container, text, textStart, superscriptRanges, refe
     if (end <= start) continue;
     const segment = text.slice(start, end);
     const isSuperscript = (superscriptRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
-    const target = isSuperscript ? document.createElement("sup") : container;
-    appendPdfLinkedText(target, segment, references, visuals, isReferenceEntry);
-    if (isSuperscript) container.append(target);
+    const isSubscript = (subscriptRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
+    const isMath = (mathRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
+    const target = isSuperscript ? document.createElement("sup") : isSubscript ? document.createElement("sub") : container;
+    const contentTarget = isMath ? document.createElement("var") : target;
+    if (isMath && target !== container) target.append(contentTarget);
+    appendPdfLinkedText(contentTarget, segment, references, visuals, isReferenceEntry);
+    if (isMath && target === container) container.append(contentTarget);
+    else if (target !== container) container.append(target);
   }
 }
 
@@ -1338,7 +1363,7 @@ function render(metadata, passages, sourceUrl) {
       } else span.title = "Read from this sentence";
       const sentenceTextOffset = passage.pdfText ? passage.text.indexOf(sentence, passageTextOffset) : -1;
       if (passage.pdfText) {
-        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, references, visuals, Boolean(referenceNumber));
+        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, passage.subscriptRanges, passage.mathRanges, references, visuals, Boolean(referenceNumber));
         passageTextOffset = Math.max(passageTextOffset, sentenceTextOffset + sentence.length);
       }
       else appendLinkedPassageText(span, sentence, passage.links);

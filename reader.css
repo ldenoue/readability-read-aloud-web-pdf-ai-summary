@@ -79,6 +79,8 @@ article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.
 .passage.pdf-text.pdf-bold { font-weight:700; }
 .passage.pdf-text.pdf-italic { font-style:italic; }
 .passage.pdf-text sup { font-size:.72em; line-height:0; vertical-align:super; }
+.passage.pdf-text sub { font-size:.72em; line-height:0; vertical-align:sub; }
+.passage.pdf-text var { font-family:Georgia,"Times New Roman",serif; font-style:italic; }
 .passage.code { margin:20px 0 28px; padding:16px 18px; overflow:auto; cursor:text; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:10px; font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; white-space:pre; tab-size:2; }
 .passage.code code { font:inherit; }
 .passage.image { margin:28px 0 34px; padding:0; text-align:center; background:transparent; box-shadow:none; }

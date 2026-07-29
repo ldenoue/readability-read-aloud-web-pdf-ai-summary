@@ -137,6 +137,7 @@ function pdfTokens(content, viewport, fontLookup = () => null) {
       fontSize: fontHeight,
       isBold: /(?:bold|black|heavy|semibold|demi)/i.test(fontDescription),
       isItalic: /(?:italic|oblique)/i.test(fontDescription),
+      isMath: /(?:cambria\s*math|stix|mathjax|latinmodernmath|texgyre.*math|(?:^|[+\s_-])(?:cmmi|cmsy|cmex|msam|msbm|stmary|rsfs|eufm|symbol|mathematicalpi)\d*(?:$|[+\s_-]))/i.test(fontDescription),
       originX: tx[4], originY: tx[5], advanceUnitX, advanceUnitY,
       ascentX: normalUnitX * ascent, ascentY: normalUnitY * ascent,
       descentX: -normalUnitX * descent, descentY: -normalUnitY * descent,
@@ -162,7 +163,7 @@ function splitItemTokens(item) {
       [startX + item.descentX, startY + item.descentY], [endX + item.descentX, endY + item.descentY],
     ];
     return {
-      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, baselineY: startY, isBold: item.isBold, isItalic: item.isItalic, isHorizontal: item.isHorizontal,
+      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, baselineY: startY, isBold: item.isBold, isItalic: item.isItalic, isMath: item.isMath, isHorizontal: item.isHorizontal,
       x1: Math.min(...points.map((point) => point[0])), y1: Math.min(...points.map((point) => point[1])),
       x2: Math.max(...points.map((point) => point[0])), y2: Math.max(...points.map((point) => point[1])),
     };
@@ -232,7 +233,12 @@ function joinRowTokens(tokens) {
     }
     const isSuperscript = token.fontSize <= medianFontSize * 0.85
       && token.baselineY <= baseline - medianFontSize * 0.12;
-    text += isSuperscript ? `\uE100${token.text}\uE101` : token.text;
+    const isSubscript = token.fontSize <= medianFontSize * 0.88
+      && token.baselineY >= baseline + medianFontSize * 0.12;
+    let tokenText = token.isMath ? `\uE104${token.text}\uE105` : token.text;
+    if (isSuperscript) tokenText = `\uE100${tokenText}\uE101`;
+    else if (isSubscript) tokenText = `\uE102${tokenText}\uE103`;
+    text += tokenText;
     previous = token;
   }
   return text;
