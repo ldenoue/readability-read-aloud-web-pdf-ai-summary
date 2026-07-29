@@ -36,6 +36,7 @@ const packageFiles = [
   "reader.html",
   "reader.js",
   "service-worker.js",
+  "summary-client.js",
   "youtube-transcript.js",
 ];
 

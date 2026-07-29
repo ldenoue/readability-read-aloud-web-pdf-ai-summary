@@ -6,6 +6,8 @@ import { linkMatches } from "./dist/linkify.js";
 import { renderArticlePdf } from "./dist/pdf-export.js";
 import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
 import { embedTexts } from "./embedding-client.js";
+import { clearGemmaSummarizer, measureGemmaTokens, summarizeWithGemma } from "./summary-client.js";
+import { getLocalYouTubeTranscript, youtubeTranscriptArticle } from "./youtube-transcript.js";
 
 const $ = (selector) => document.querySelector(selector);
 const state = { passages: [], index: 0, sentence: 0, run: 0, reading: false, language: "" };
@@ -17,10 +19,18 @@ const SUMMARIZER_LANGUAGES = ["en", "fr", "de", "es", "ja"];
 let summaryApiSupported = false;
 let documentReady = false;
 let summaryStarted = false;
-let summaryPreference = "auto";
+const CHROME_SUMMARY_PREFERENCE = "speed";
 let activeDocumentId = "";
 let activeSourceUrl = "";
 let activeMetadata = {};
+let youtubePlayerLoaded;
+const YOUTUBE_APP_IDENTITY = "https://readability-read-aloud.gpgkihaonhnhfabcmgnmkjlmoegfkbne/";
+let youtubeSyncTimer = null;
+let youtubeTimelineCache = null;
+let youtubeHighlightedPosition = "";
+let youtubeClockSeconds = 0;
+let youtubeClockUpdatedAt = 0;
+let youtubeClockPlaying = false;
 
 function dataUrl(blob) {
   return new Promise((resolve, reject) => {
@@ -115,81 +125,61 @@ async function indexSavedDocument(saved) {
 
 function restoreSavedSummary(summary) {
   if (!summary?.text) return false;
-  summaryStarted = true;
+  summaryStarted = false;
   $("#summaryPanel").hidden = false;
   $("#summaryLoading").hidden = true;
-  $("#summarize").hidden = true;
   $("#summaryText").textContent = summary.text;
   $("#summaryText").hidden = false;
+  updateSummaryControls();
   return true;
 }
 
 async function setupSummarizer() {
-  if (!("Summarizer" in globalThis)) {
-    $("#summaryLoading").hidden = true;
-    const button = $("#summarize");
-    button.hidden = false;
-    button.disabled = true;
-    button.textContent = "Local AI summary unavailable";
-    return;
-  }
-  summaryApiSupported = true;
-  void maybeSummarizeAutomatically();
+  summaryApiSupported = "Summarizer" in globalThis;
+  updateSummaryControls();
 }
 
-async function maybeSummarizeAutomatically() {
-  if (!summaryApiSupported || !documentReady || summaryStarted || !state.passages.some((passage) => passage.text)) return;
+function updateSummaryControls() {
+  const button = $("#summarize");
+  const provider = $("#summaryProvider").value;
+  const hasContent = documentReady && state.passages.some((passage) => passage.text || passage.type === "table");
+  const supported = provider === "chrome" ? summaryApiSupported : Boolean(navigator.gpu);
+  button.hidden = false;
+  button.disabled = summaryStarted || !hasContent || !supported;
+  if (!supported) button.textContent = provider === "chrome" ? "Chrome local API unavailable" : "WebGPU unavailable";
+  else if (!$("#summaryText").hidden && $("#summaryText").textContent) button.textContent = "Regenerate local summary";
+  else button.textContent = provider === "chrome" ? "Generate with local Chrome API" : "Generate with Gemma 3 WebGPU";
+}
+
+async function prepareChromeSummary() {
+  if (!summaryApiSupported) throw new Error("The local Chrome Summarizer API is unavailable.");
   summaryLanguagePromise ||= detectSummaryLanguage();
   const language = await summaryLanguagePromise;
-  if (!SUMMARIZER_LANGUAGES.includes(language)) {
-    $("#summaryLoading").hidden = true;
-    const button = $("#summarize");
-    button.hidden = false;
-    button.disabled = true;
-    button.textContent = `${language.toUpperCase()} summaries unavailable`;
-    return;
+  if (!SUMMARIZER_LANGUAGES.includes(language)) throw new Error(`${language.toUpperCase()} summaries are unavailable in the Chrome local API.`);
+  const availability = await Summarizer.availability({
+    type: "tldr",
+    format: "plain-text",
+    length: "short",
+    preference: CHROME_SUMMARY_PREFERENCE,
+    expectedInputLanguages: [language],
+    outputLanguage: language,
+  });
+  if (!["downloadable", "downloading", "available"].includes(availability)) {
+    throw new Error(`Chrome's speed summarizer is unavailable for ${language.toUpperCase()}.`);
   }
-  try {
-    const preferences = language === "en" ? ["speed", "auto"] : ["auto"];
-    let downloadablePreference = null;
-    for (const preference of preferences) {
-      const base = { type: "tldr", format: "plain-text", preference, expectedInputLanguages: [language], outputLanguage: language };
-      const availability = await Promise.all([
-        Summarizer.availability({ ...base, length: "long" }),
-        Summarizer.availability({ ...base, length: "short" }),
-      ]);
-      if (availability.every((value) => value === "available")) {
-        summaryPreference = preference;
-        summaryStarted = true;
-        $("#summaryPanel").hidden = false;
-        $("#summaryLoading").hidden = false;
-        void summarizeLocally();
-        return;
-      }
-      if (!downloadablePreference && availability.every((value) => ["downloadable", "downloading", "available"].includes(value))) downloadablePreference = preference;
-    }
-    if (downloadablePreference) {
-      summaryPreference = downloadablePreference;
-      $("#summaryLoading").hidden = true;
-      const button = $("#summarize");
-      button.hidden = false;
-      button.disabled = false;
-      button.textContent = "Download & summarize locally";
-    } else {
-      $("#summaryLoading").hidden = true;
-      const button = $("#summarize");
-      button.hidden = false;
-      button.disabled = true;
-      button.textContent = "Local AI summary unavailable";
-    }
-  } catch (error) {
-    console.warn("Automatic local summary unavailable:", error);
-    $("#summaryLoading").hidden = true;
-    const button = $("#summarize");
-    button.hidden = false;
-    button.disabled = true;
-    button.textContent = "Local AI summary unavailable";
-  }
+  return language;
+}
+
+async function chromeSummarizerAvailable(length, language) {
+  const availability = await Summarizer.availability({
+    type: "tldr",
+    format: "plain-text",
+    length,
+    preference: CHROME_SUMMARY_PREFERENCE,
+    expectedInputLanguages: [language],
+    outputLanguage: language,
+  });
+  return ["downloadable", "downloading", "available"].includes(availability);
 }
 
 async function detectSummaryLanguage() {
@@ -256,7 +246,25 @@ async function splitOversizedPart(text, summarizer, limit) {
   return splitForQuota(units, summarizer, 0.78);
 }
 
-async function summarizeLocally() {
+async function persistGeneratedSummary(text, language, provider) {
+  if (!activeDocumentId || !text) return;
+  try {
+    await updateDocumentSummary(activeDocumentId, { text, language, provider, createdAt: Date.now() });
+  } catch (error) {
+    console.warn("Could not persist local summary:", error);
+  }
+}
+
+function showSummaryError(error) {
+  summaryStarted = false;
+  $("#summaryLoading").hidden = true;
+  $("#summaryText").hidden = false;
+  $("#summaryText").textContent = `Could not summarize locally: ${error.message}`;
+  updateSummaryControls();
+  setStatus({ state: "error", message: error.message });
+}
+
+async function summarizeWithChromeApi() {
   const parts = summarySourceParts();
   if (!parts.length) return;
   $("#summaryPanel").hidden = false;
@@ -266,22 +274,27 @@ async function summarizeLocally() {
   let mapSummarizer;
   let finalSummarizer;
   try {
-    const language = await (summaryLanguagePromise ||= detectSummaryLanguage());
+    const language = await prepareChromeSummary();
     const downloadProgress = (loaded) => {
       const percent = Math.round(loaded * 100);
       if (loaded < 0.99) {
         setStatus({ state: "loading", message: `Downloading summarizer · ${percent}%` });
       } else {
-        setStatus({ state: "loading", message: "Summarizing locally…" });
+        setStatus({ state: "loading", message: "Summarizing with Chrome's speed model…" });
       }
     };
-    mapSummarizer = await createLocalSummarizer("long", downloadProgress, language, summaryPreference);
-    finalSummarizer = await createLocalSummarizer("short", downloadProgress, language, summaryPreference);
-    let groups = await splitForQuota(parts, mapSummarizer);
-    if (groups.length === 1 && await finalSummarizer.measureInputUsage(groups[0]) <= finalSummarizer.inputQuota * 0.78) {
+    finalSummarizer = await createLocalSummarizer("short", downloadProgress, language, CHROME_SUMMARY_PREFERENCE);
+    let groups = await splitForQuota(parts, finalSummarizer);
+    if (groups.length === 1) {
       const summary = await finalSummarizer.summarize(groups[0]);
       $("#summaryText").textContent = summary;
     } else {
+      // A normal article needs only the short speed summarizer. Load the long
+      // intermediate variant solely when the input exceeds that model's quota.
+      mapSummarizer = await chromeSummarizerAvailable("long", language)
+        ? await createLocalSummarizer("long", downloadProgress, language, CHROME_SUMMARY_PREFERENCE)
+        : finalSummarizer;
+      groups = await splitForQuota(parts, mapSummarizer);
       let summaries = [];
       for (let index = 0; index < groups.length; index++) {
         setStatus({ state: "loading", message: `Summarizing section ${index + 1} of ${groups.length}…` });
@@ -299,29 +312,96 @@ async function summarizeLocally() {
       $("#summaryText").textContent = await finalSummarizer.summarize(summaries.join("\n\n"), { context: "Produce the final TLDR of this document." });
     }
     const summaryText = $("#summaryText").textContent;
-    if (activeDocumentId && summaryText) {
-      try {
-        await updateDocumentSummary(activeDocumentId, { text: summaryText, language, createdAt: Date.now() });
-      } catch (error) {
-        console.warn("Could not persist local summary:", error);
-      }
-    }
+    await persistGeneratedSummary(summaryText, language, "chrome");
     $("#summaryText").hidden = false;
     $("#summaryLoading").hidden = true;
-    setStatus({ state: "ready", message: "Local AI summary ready" });
-  } catch (error) {
     summaryStarted = false;
-    $("#summaryLoading").hidden = true;
-    $("#summaryText").hidden = false;
-    $("#summaryText").textContent = `Could not summarize locally: ${error.message}`;
-    const button = $("#summarize");
-    button.hidden = false;
-    button.disabled = false;
-    button.textContent = "Try summary again";
-    setStatus({ state: "error", message: error.message });
+    updateSummaryControls();
+    setStatus({ state: "ready", message: "Chrome speed summary ready" });
+  } catch (error) {
+    showSummaryError(error);
   } finally {
-    mapSummarizer?.destroy();
+    if (mapSummarizer && mapSummarizer !== finalSummarizer) mapSummarizer.destroy();
     finalSummarizer?.destroy();
+  }
+}
+
+// Although the model advertises a 32K context, the 270M checkpoint follows
+// summarization instructions more reliably with focused source windows. This
+// also bounds the WebGPU prefill/KV-cache allocation on integrated GPUs.
+const GEMMA_INPUT_TOKEN_BUDGET = 3000;
+
+async function splitOversizedGemmaPart(text, maxTokens, onProgress) {
+  if (await measureGemmaTokens(text, onProgress) <= maxTokens) return [text];
+  const units = sentences(text);
+  if (units.length > 1) return gemmaSummaryChunks(units, maxTokens, onProgress);
+  const midpoint = Math.floor(text.length / 2);
+  const splitAt = text.lastIndexOf(" ", midpoint) > text.length * 0.25 ? text.lastIndexOf(" ", midpoint) : midpoint;
+  return [
+    ...await splitOversizedGemmaPart(text.slice(0, splitAt), maxTokens, onProgress),
+    ...await splitOversizedGemmaPart(text.slice(splitAt).trim(), maxTokens, onProgress),
+  ];
+}
+
+async function gemmaSummaryChunks(parts, maxTokens = GEMMA_INPUT_TOKEN_BUDGET, onProgress) {
+  const chunks = [];
+  let current = "";
+  for (const part of parts) {
+    const units = await splitOversizedGemmaPart(part, maxTokens, onProgress);
+    for (const unit of units) {
+      const candidate = current ? `${current}\n\n${unit}` : unit;
+      if (current && await measureGemmaTokens(candidate, onProgress) > maxTokens) {
+        chunks.push(current);
+        current = unit;
+      } else current = candidate;
+    }
+  }
+  if (current) chunks.push(current);
+  return chunks;
+}
+
+async function summarizeWithGemmaModel() {
+  const parts = summarySourceParts();
+  if (!parts.length) return;
+  if (!navigator.gpu) throw new Error("WebGPU is unavailable in this browser.");
+  $("#summaryPanel").hidden = false;
+  $("#summaryText").hidden = true;
+  $("#summaryLoading").hidden = false;
+  try {
+    const progress = (event) => {
+      if (event.status === "progress_total") setStatus({ state: "loading", message: `Downloading Gemma 3 270M · ${Math.round(event.progress || 0)}%` });
+      else if (event.status === "generating") setStatus({ state: "loading", message: "Summarizing locally with Gemma 3…" });
+    };
+    let groups = await gemmaSummaryChunks(parts, GEMMA_INPUT_TOKEN_BUDGET, progress);
+    let summaries = [];
+    if (groups.length === 1) summaries.push(await summarizeWithGemma(groups[0], "direct", progress));
+    for (let index = 0; index < groups.length; index++) {
+      if (groups.length === 1) break;
+      setStatus({ state: "loading", message: groups.length > 1 ? `Summarizing section ${index + 1} of ${groups.length} with Gemma 3…` : "Loading Gemma 3 locally…" });
+      summaries.push(await summarizeWithGemma(groups[index], "section", progress));
+    }
+    let rounds = 0;
+    while (summaries.length > 1 || await measureGemmaTokens(summaries[0], progress) > GEMMA_INPUT_TOKEN_BUDGET) {
+      if (++rounds > 6) throw new Error("The document could not be reduced to the Gemma 3 context window.");
+      groups = await gemmaSummaryChunks(summaries, GEMMA_INPUT_TOKEN_BUDGET, progress);
+      if (groups.length === 1) {
+        summaries = [await summarizeWithGemma(groups[0], "final", progress)];
+        break;
+      }
+      summaries = [];
+      for (const group of groups) summaries.push(await summarizeWithGemma(group, "reduction", progress));
+    }
+    const summaryText = summaries[0];
+    const language = await (summaryLanguagePromise ||= detectSummaryLanguage());
+    $("#summaryText").textContent = summaryText;
+    $("#summaryText").hidden = false;
+    $("#summaryLoading").hidden = true;
+    await persistGeneratedSummary(summaryText, language, "gemma-3-270m-it-q4f16-webgpu");
+    summaryStarted = false;
+    updateSummaryControls();
+    setStatus({ state: "ready", message: "Gemma 3 local AI summary ready" });
+  } catch (error) {
+    showSummaryError(error);
   }
 }
 
@@ -339,6 +419,7 @@ async function savePreferences() {
       model: $("#model").value,
       voice: $("#voice").value,
       speed: $("#speed").value,
+      summaryProvider: $("#summaryProvider").value,
     },
   });
 }
@@ -349,9 +430,12 @@ async function restorePreferences() {
   if (InflectTTS.MODELS[readerPreferences.model]) $("#model").value = readerPreferences.model;
   if (PocketTTS.VOICES.includes(readerPreferences.voice)) $("#voice").value = readerPreferences.voice;
   if ([...$("#speed").options].some((option) => option.value === readerPreferences.speed)) $("#speed").value = readerPreferences.speed;
+  const savedSummaryProvider = readerPreferences.summaryProvider === "lfm" ? "gemma" : readerPreferences.summaryProvider;
+  if (["chrome", "gemma"].includes(savedSummaryProvider)) $("#summaryProvider").value = savedSummaryProvider;
   inflectTts.setModel($("#model").value);
   pocketTts.setVoice($("#voice").value);
   applyProviderUI();
+  updateSummaryControls();
 }
 
 function setStatus({ state: statusState, message }) {
@@ -439,7 +523,7 @@ function htmlPassages(html, sourceUrl) {
   const document = new DOMParser().parseFromString(html, "text/html");
   document.querySelectorAll("script, style, noscript, nav, form").forEach((element) => element.remove());
   const passages = [];
-  for (const element of document.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, img")) {
+  for (const element of document.querySelectorAll("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, table, img, .comment-metadata, .comment-content")) {
     if (element.matches("img")) {
       const rawSource = element.getAttribute("src") || element.getAttribute("data-src") || element.getAttribute("data-original");
       const width = element.getAttribute("width");
@@ -477,17 +561,70 @@ function htmlPassages(html, sourceUrl) {
       });
       continue;
     }
+    if (element.matches("table")) {
+      const rows = [...element.querySelectorAll("tr")].map((row) => ({
+        cells: [...row.querySelectorAll(":scope > th, :scope > td")].map((cell) => ({
+          text: cell.textContent.replace(/\s+/g, " ").trim(),
+          header: cell.matches("th"),
+        })).filter((cell) => cell.text),
+      })).filter((row) => row.cells.length);
+      if (rows.length) passages.push({ type: "table", text: "", table: { rows } });
+      continue;
+    }
+    if (element.matches(".comment-metadata, .comment-content") && element.querySelector("h1, h2, h3, h4, h5, h6, p, blockquote, li, pre, table, img")) continue;
     if (element.closest("pre")) continue;
+    if (element.closest("table")) continue;
+    if (element.matches("blockquote") && element.querySelector("h1, h2, h3, h4, h5, h6, p, li, pre, table, img, .comment-metadata, .comment-content")) continue;
     if (element.matches("li") && element.querySelector("p, blockquote")) continue;
+    const links = [...element.querySelectorAll("a[href]")].flatMap((anchor) => {
+      const label = anchor.textContent.replace(/\s+/g, " ").trim();
+      if (!label) return [];
+      try {
+        const href = new URL(anchor.getAttribute("href"), sourceUrl);
+        return ["http:", "https:", "mailto:"].includes(href.protocol) ? [{ label, href: href.href }] : [];
+      } catch { return []; }
+    });
     const text = element.textContent
-      .replace(/https?:\/\/\S+/g, "")
       .replace(/\s+([,.;:!?])/g, "$1")
       .replace(/\s+/g, " ")
       .trim();
     if (!text) continue;
-    passages.push({ type: element.matches("h1, h2, h3, h4, h5, h6") ? "heading" : "paragraph", text });
+    passages.push({ type: element.matches("h1, h2, h3, h4, h5, h6") ? "heading" : "paragraph", text, ...(links.length ? { links } : {}) });
   }
   return passages;
+}
+
+function decorateConversationPassages(passages, siteName = "") {
+  const site = String(siteName || "").trim();
+  if (!/^(?:ChatGPT|Claude|Gemini|Grok)$/i.test(site)) return passages;
+  const speakerPattern = /^(you|user|assistant|chatgpt|claude|gemini|grok)(?:\s+said)?$/i;
+  const decorated = [];
+  let role = "";
+  let speaker = "";
+  let group = -1;
+  let firstInGroup = false;
+  for (const passage of passages) {
+    const label = String(passage.text || "").replace(/\s+/g, " ").trim();
+    const speakerMatch = label.match(speakerPattern);
+    if (["heading", "paragraph"].includes(passage.type) && speakerMatch) {
+      const normalizedSpeaker = speakerMatch[1];
+      speaker = /^(?:you|user)$/i.test(normalizedSpeaker) ? "You" : normalizedSpeaker === "chatgpt" ? "ChatGPT" : normalizedSpeaker[0].toUpperCase() + normalizedSpeaker.slice(1);
+      role = /^(?:you|user)$/i.test(normalizedSpeaker) ? "user" : "assistant";
+      group++;
+      firstInGroup = true;
+      continue;
+    }
+    if (role) {
+      decorated.push({
+        ...passage,
+        chatRole: role,
+        chatGroup: group,
+        ...(firstInGroup ? { chatSpeaker: speaker } : {}),
+      });
+      firstInGroup = false;
+    } else decorated.push(passage);
+  }
+  return group >= 0 ? decorated : passages;
 }
 
 function passageSentences(passage) {
@@ -881,6 +1018,34 @@ function appendLinkifiedPdfText(container, text) {
   container.append(document.createTextNode(text.slice(offset)));
 }
 
+function appendLinkedPassageText(container, text, links = []) {
+  const matches = linkMatches(text).map((match) => ({ ...match, priority: 0 }));
+  for (const link of links) {
+    let offset = 0;
+    while (offset < text.length) {
+      const index = text.indexOf(link.label, offset);
+      if (index < 0) break;
+      matches.push({ start: index, end: index + link.label.length, label: link.label, href: link.href, priority: 1 });
+      offset = index + link.label.length;
+    }
+  }
+  const selected = matches.sort((left, right) => left.start - right.start || right.priority - left.priority || right.end - left.end)
+    .filter((match, index, sorted) => !sorted.slice(0, index).some((earlier) => match.start < earlier.end));
+  let offset = 0;
+  for (const match of selected) {
+    container.append(document.createTextNode(text.slice(offset, match.start)));
+    const link = document.createElement("a");
+    link.className = "pdf-external-link";
+    link.href = match.href;
+    link.target = "_blank";
+    link.rel = "noopener noreferrer";
+    link.textContent = match.label;
+    container.append(link);
+    offset = match.end;
+  }
+  container.append(document.createTextNode(text.slice(offset)));
+}
+
 function textForSpeech(text) {
   let spoken = "";
   let offset = 0;
@@ -1074,9 +1239,9 @@ function render(metadata, passages, sourceUrl) {
   const article = $("#article");
   activeSourceUrl = sourceUrl;
   activeMetadata = metadata;
+  setupYouTubePlayer(sourceUrl);
   article.replaceChildren();
-  try { article.classList.toggle("youtube-transcript", /^(?:www\.|m\.)?youtube\.com$/i.test(new URL(sourceUrl).hostname)); }
-  catch { article.classList.remove("youtube-transcript"); }
+  article.classList.toggle("youtube-transcript", Boolean(youtubeIdFromUrl(sourceUrl)));
   const title = metadata.title || passages.find((passage) => passage.type === "heading")?.text || new URL(sourceUrl).hostname;
   if (!metadata.hideTitle) {
     const heading = document.createElement("h1");
@@ -1088,6 +1253,8 @@ function render(metadata, passages, sourceUrl) {
   const referenceIndex = associatePdfReferences(passages);
   const references = referenceIndex.numbers;
   const visuals = associatePdfVisuals(passages);
+  const chatGroups = new Map();
+  article.classList.toggle("conversation-thread", passages.some((passage) => passage.chatRole));
   passages.forEach((passage, index) => {
     if (!metadata.hideTitle && index === 0 && passage.type === "heading" && passage.text === title) return;
     const element = document.createElement(passage.type === "heading" ? (passage.headingLevel === 1 ? "h1" : "h2") : ["image", "formula"].includes(passage.type) ? "figure" : passage.type === "table" ? "section" : passage.type === "code" ? "pre" : "p");
@@ -1174,10 +1341,25 @@ function render(metadata, passages, sourceUrl) {
         appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, references, visuals, Boolean(referenceNumber));
         passageTextOffset = Math.max(passageTextOffset, sentenceTextOffset + sentence.length);
       }
-      else span.textContent = sentence;
+      else appendLinkedPassageText(span, sentence, passage.links);
       element.append(span);
     });
-    article.append(element);
+    if (passage.chatRole) {
+      let message = chatGroups.get(passage.chatGroup);
+      if (!message) {
+        message = document.createElement("section");
+        message.className = `chat-bubble chat-bubble-${passage.chatRole}`;
+        if (passage.chatSpeaker) {
+          const label = document.createElement("span");
+          label.className = "chat-speaker";
+          label.textContent = passage.chatSpeaker;
+          message.append(label);
+        }
+        chatGroups.set(passage.chatGroup, message);
+        article.append(message);
+      }
+      message.append(element);
+    } else article.append(element);
   });
 }
 
@@ -1341,7 +1523,7 @@ async function exportCurrentArticle() {
   }
 }
 
-function markCurrent(index, sentenceIndex = 0) {
+function markCurrent(index, sentenceIndex = 0, scroll = true) {
   document.querySelectorAll(".passage").forEach((element) => {
     const elementIndex = Number(element.dataset.index);
     element.classList.toggle("current", elementIndex === index);
@@ -1352,12 +1534,22 @@ function markCurrent(index, sentenceIndex = 0) {
       sentence.classList.toggle("done", elementIndex < index || (elementIndex === index && currentSentence < sentenceIndex));
     });
   });
-  document.querySelector(`.passage[data-index="${index}"] .sentence[data-sentence="${sentenceIndex}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (scroll) document.querySelector(`.passage[data-index="${index}"] .sentence[data-sentence="${sentenceIndex}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
 }
 
 async function readArticle() {
   if (state.reading) return;
   if (state.index >= state.passages.length) { state.index = 0; state.sentence = 0; }
+  if (youtubeIdFromUrl(activeSourceUrl)) {
+    const exactStart = state.passages[state.index]?.youtubeSentenceStarts?.[state.sentence];
+    const nextStart = youtubeTimeline().find(({ passageIndex, sentenceIndex }) =>
+      passageIndex > state.index || (passageIndex === state.index && sentenceIndex >= state.sentence))?.start;
+    const start = Number.isFinite(exactStart) ? exactStart
+      : Number.isFinite(nextStart) ? nextStart
+        : youtubeClockSeconds * 1000;
+    await playYouTubeAt(start);
+    return;
+  }
   state.reading = true;
   const run = ++state.run;
   $("#play").disabled = true;
@@ -1400,8 +1592,16 @@ function readFromPosition(index, sentenceIndex = 0) {
   const passage = state.passages[index];
   if (!passage || !Number.isInteger(sentenceIndex) || sentenceIndex < 0 || sentenceIndex >= passage.sentences.length) return;
   const youtubeStart = passage.youtubeSentenceStarts?.[sentenceIndex];
-  if (Number.isFinite(youtubeStart)) {
-    void playYouTubeAt(youtubeStart);
+  if (youtubeIdFromUrl(activeSourceUrl)) {
+    state.run++;
+    state.reading = false;
+    state.index = index;
+    state.sentence = sentenceIndex;
+    inflectTts.stop();
+    pocketTts.stop();
+    markCurrent(index, sentenceIndex);
+    if (Number.isFinite(youtubeStart)) void playYouTubeAt(youtubeStart);
+    else setStatus({ state: "error", message: "This transcript sentence has no video timestamp. Reopen the YouTube video to refresh its transcript." });
     return;
   }
   state.run++;
@@ -1421,39 +1621,183 @@ function formatVideoTime(milliseconds) {
   return `${minutes}:${seconds}`;
 }
 
-async function playYouTubeAt(milliseconds) {
-  const seconds = Math.max(0, milliseconds / 1000);
-  let videoId = "";
-  try { videoId = new URL(activeSourceUrl).searchParams.get("v") || ""; } catch {}
+function youtubeIdFromUrl(sourceUrl) {
   try {
-    const tabs = await chrome.tabs.query({ url: ["https://www.youtube.com/watch*", "https://m.youtube.com/watch*"] });
-    const tab = tabs.find((candidate) => {
-      try { return new URL(candidate.url).searchParams.get("v") === videoId; } catch { return false; }
-    });
-    if (tab?.id) {
-      const [{ result: played } = {}] = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        func: async (time) => {
-          const video = document.querySelector("video");
-          if (!video) return false;
-          video.currentTime = time;
-          try { await video.play(); } catch {}
-          return true;
-        },
-        args: [seconds],
-      });
-      if (played) {
-        await chrome.tabs.update(tab.id, { active: true });
-        setStatus({ state: "ready", message: `Playing YouTube from ${formatVideoTime(milliseconds)}` });
-        return;
-      }
+    const url = new URL(sourceUrl);
+    if (url.hostname === "youtu.be") return url.pathname.split("/").filter(Boolean)[0] || "";
+    if (/^(?:www\.|m\.)?youtube\.com$/i.test(url.hostname)) {
+      return url.searchParams.get("v") || url.pathname.match(/^\/(?:shorts|embed)\/([^/?#]+)/)?.[1] || "";
     }
-  } catch (error) {
-    console.warn("Could not seek the existing YouTube tab:", error);
+  } catch {}
+  return "";
+}
+
+function setupYouTubePlayer(sourceUrl) {
+  const panel = $("#youtubePlayerPanel");
+  const iframe = $("#youtubePlayer");
+  const videoId = youtubeIdFromUrl(sourceUrl);
+  stopYouTubeSync();
+  youtubeTimelineCache = null;
+  youtubeHighlightedPosition = "";
+  youtubeClockSeconds = 0;
+  youtubeClockUpdatedAt = 0;
+  youtubeClockPlaying = false;
+  panel.hidden = !videoId;
+  if (!videoId) {
+    iframe.removeAttribute("src");
+    youtubePlayerLoaded = null;
+    return;
   }
-  const url = new URL(activeSourceUrl);
-  url.searchParams.set("t", `${Math.floor(seconds)}s`);
-  await chrome.tabs.create({ url: url.href });
+  if (iframe.dataset.videoId === videoId) return;
+  iframe.dataset.videoId = videoId;
+  youtubePlayerLoaded = new Promise((resolve) => iframe.addEventListener("load", () => {
+    listenToYouTubePlayer();
+    resolve();
+  }, { once: true }));
+  const parameters = new URLSearchParams({
+    enablejsapi: "1",
+    playsinline: "1",
+    rel: "0",
+    // The JS API validates postMessage against the real embedding origin.
+    // Client identity itself is supplied separately by the scoped Referer rule.
+    origin: location.origin,
+    widget_referrer: YOUTUBE_APP_IDENTITY,
+  });
+  iframe.referrerPolicy = "strict-origin-when-cross-origin";
+  iframe.src = `https://www.youtube-nocookie.com/embed/${encodeURIComponent(videoId)}?${parameters}`;
+}
+
+function postToYouTubePlayer(message) {
+  $("#youtubePlayer").contentWindow?.postMessage(JSON.stringify(message), "https://www.youtube-nocookie.com");
+}
+
+function listenToYouTubePlayer() {
+  postToYouTubePlayer({ event: "listening", id: "readability-reader" });
+}
+
+function youtubeTimeline() {
+  youtubeTimelineCache ||= state.passages.flatMap((passage, passageIndex) =>
+    (passage.youtubeSentenceStarts || []).map((start, sentenceIndex) => ({ start, passageIndex, sentenceIndex })))
+    .filter(({ start }) => Number.isFinite(start))
+    .sort((left, right) => left.start - right.start);
+  return youtubeTimelineCache;
+}
+
+function syncYouTubeTranscript(seconds) {
+  const milliseconds = seconds * 1000;
+  const timeline = youtubeTimeline();
+  let low = 0;
+  let high = timeline.length - 1;
+  let match = null;
+  while (low <= high) {
+    const middle = (low + high) >> 1;
+    if (timeline[middle].start <= milliseconds + 120) {
+      match = timeline[middle];
+      low = middle + 1;
+    } else high = middle - 1;
+  }
+  if (!match) return;
+  const position = `${match.passageIndex}:${match.sentenceIndex}`;
+  if (position === youtubeHighlightedPosition) return;
+  youtubeHighlightedPosition = position;
+  state.index = match.passageIndex;
+  state.sentence = match.sentenceIndex;
+  markCurrent(match.passageIndex, match.sentenceIndex, false);
+}
+
+function requestYouTubeCurrentTime() {
+  postToYouTubePlayer({ event: "command", func: "getCurrentTime", args: [] });
+}
+
+function updateYouTubeClock(seconds, playing = youtubeClockPlaying) {
+  if (Number.isFinite(seconds)) youtubeClockSeconds = Math.max(0, seconds);
+  youtubeClockUpdatedAt = performance.now();
+  youtubeClockPlaying = playing;
+}
+
+function youtubeSyncTick() {
+  requestYouTubeCurrentTime();
+  if (!youtubeClockPlaying || !youtubeClockUpdatedAt) return;
+  syncYouTubeTranscript(youtubeClockSeconds + (performance.now() - youtubeClockUpdatedAt) / 1000);
+}
+
+function startYouTubeSync() {
+  if (!youtubeClockPlaying) updateYouTubeClock(youtubeClockSeconds, true);
+  if (youtubeSyncTimer) return;
+  listenToYouTubePlayer();
+  youtubeSyncTick();
+  youtubeSyncTimer = setInterval(youtubeSyncTick, 200);
+}
+
+function stopYouTubeSync() {
+  if (youtubeClockPlaying && youtubeClockUpdatedAt) {
+    youtubeClockSeconds += (performance.now() - youtubeClockUpdatedAt) / 1000;
+    youtubeClockUpdatedAt = performance.now();
+  }
+  youtubeClockPlaying = false;
+  if (!youtubeSyncTimer) return;
+  clearInterval(youtubeSyncTimer);
+  youtubeSyncTimer = null;
+}
+
+window.addEventListener("message", (event) => {
+  const iframe = $("#youtubePlayer");
+  if (event.source !== iframe.contentWindow || !/^https:\/\/(?:www\.)?youtube(?:-nocookie)?\.com$/u.test(event.origin)) return;
+  let message = event.data;
+  if (typeof message === "string") {
+    try { message = JSON.parse(message); } catch { return; }
+  }
+  if (!["infoDelivery", "initialDelivery"].includes(message?.event)) return;
+  const info = message.info || {};
+  if (Number.isFinite(info.currentTime)) {
+    updateYouTubeClock(info.currentTime);
+    syncYouTubeTranscript(info.currentTime);
+  }
+  if (info.playerState === 1) startYouTubeSync();
+  else if ([0, 2].includes(info.playerState)) stopYouTubeSync();
+  if (info.playerState === 1) {
+    $("#play").disabled = true;
+    $("#stop").disabled = false;
+  } else if ([0, 2].includes(info.playerState)) {
+    $("#play").disabled = false;
+    $("#play span").textContent = info.playerState === 0 ? "Replay video" : "Continue reading";
+    $("#stop").disabled = true;
+  }
+});
+
+function preparedYouTubePassages(article, sourceUrl) {
+  let paragraphIndex = 0;
+  return htmlPassages(article.content, sourceUrl).map((passage) => {
+    const prepared = { ...passage, sentences: passageSentences(passage) };
+    if (passage.type === "paragraph") prepared.youtubeSentenceStarts = article.paragraphSentenceStarts?.[paragraphIndex++] || [];
+    return prepared;
+  });
+}
+
+function hasYouTubeSentenceTimestamps(passages) {
+  return passages.some((passage) => passage.youtubeSentenceStarts?.some(Number.isFinite));
+}
+
+async function playYouTubeAt(milliseconds) {
+  try {
+    const seconds = Math.max(0, milliseconds / 1000);
+    const iframe = $("#youtubePlayer");
+    if (!iframe.dataset.videoId) setupYouTubePlayer(activeSourceUrl);
+    if (!iframe.dataset.videoId) throw new Error("This YouTube video could not be embedded.");
+    await youtubePlayerLoaded;
+    const targetOrigin = "https://www.youtube-nocookie.com";
+    listenToYouTubePlayer();
+    iframe.contentWindow.postMessage(JSON.stringify({ event: "command", func: "seekTo", args: [seconds, true] }), targetOrigin);
+    iframe.contentWindow.postMessage(JSON.stringify({ event: "command", func: "playVideo", args: [] }), targetOrigin);
+    updateYouTubeClock(seconds, true);
+    syncYouTubeTranscript(seconds);
+    startYouTubeSync();
+    $("#play").disabled = true;
+    $("#stop").disabled = false;
+    setStatus({ state: "ready", message: `Playing embedded video from ${formatVideoTime(milliseconds)}` });
+  } catch (error) {
+    setStatus({ state: "error", message: `Could not play the embedded video: ${error.message}` });
+  }
 }
 
 function stopReading() {
@@ -1461,6 +1805,10 @@ function stopReading() {
   state.reading = false;
   inflectTts.stop();
   pocketTts.stop();
+  if (youtubeIdFromUrl(activeSourceUrl)) {
+    postToYouTubePlayer({ event: "command", func: "pauseVideo", args: [] });
+    stopYouTubeSync();
+  }
   $("#play").disabled = false;
   $("#play span").textContent = "Continue reading";
   $("#stop").disabled = true;
@@ -1484,9 +1832,31 @@ async function loadArticle() {
       saved.passages = await serializablePassages(saved.passages);
       await saveDocument(saved);
     }
+    const savedVideoId = saved.videoId || youtubeIdFromUrl(saved.sourceUrl);
+    if (savedVideoId && !hasYouTubeSentenceTimestamps(saved.passages || [])) {
+      try {
+        setStatus({ state: "loading", message: "Refreshing YouTube sentence timestamps…" });
+        const refreshedArticle = youtubeTranscriptArticle(await getLocalYouTubeTranscript(savedVideoId), saved.sourceUrl);
+        saved.passages = preparedYouTubePassages(refreshedArticle, saved.sourceUrl);
+        saved.videoId = refreshedArticle.videoId;
+        saved.duration = refreshedArticle.duration;
+        saved.chapters = refreshedArticle.chapters;
+        saved.metadata = {
+          ...saved.metadata,
+          title: refreshedArticle.title,
+          author: refreshedArticle.byline,
+          site: refreshedArticle.siteName,
+          published: refreshedArticle.publishedTime,
+        };
+        await saveDocument(saved);
+      } catch (error) {
+        console.warn("Could not refresh saved YouTube timestamps:", error);
+      }
+    }
     state.language = saved.language || "";
     summaryLanguagePromise = null;
-    state.passages = (saved.passages || []).map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
+    state.passages = decorateConversationPassages(saved.passages || [], saved.metadata?.site)
+      .map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     if (!state.passages.length) throw new Error("This saved document contains no readable text.");
     $("#sourceLink").href = saved.sourceUrl;
     try { $("#sourceLink").textContent = saved.kind === "pdf" ? (saved.metadata?.displayTitle || "PDF document") : new URL(saved.sourceUrl).hostname; }
@@ -1496,7 +1866,7 @@ async function loadArticle() {
     $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
     documentReady = true;
     $("#exportPdf").disabled = false;
-    if (!restoreSavedSummary(saved.summary)) void maybeSummarizeAutomatically();
+    if (!restoreSavedSummary(saved.summary)) updateSummaryControls();
     void indexSavedDocument(saved);
     setStatus({ state: "ready", message: `Restored locally · ${state.passages.length} passages ready` });
     return;
@@ -1539,7 +1909,7 @@ async function loadArticle() {
     documentReady = true;
     $("#exportPdf").disabled = false;
     await persistDocument({ kind: "pdf", sourceUrl: pdfUrl, metadata, passages: state.passages, language: state.language, pageCount: extracted.pageCount, summary: null, embeddingChunks: null });
-    void maybeSummarizeAutomatically();
+    updateSummaryControls();
     setStatus({ state: "ready", message: `${extracted.pageCount} PDF pages · saved locally` });
     return;
   }
@@ -1561,19 +1931,17 @@ async function loadArticle() {
     published: article.publishedTime,
     word_count: Math.round((article.textContent || "").trim().split(/\s+/).length),
   };
-  let youtubeParagraphIndex = 0;
-  state.passages = htmlPassages(article.content, sourceUrl).map((passage) => {
-    const prepared = { ...passage, sentences: passageSentences(passage) };
-    if (article.kind === "youtube" && passage.type === "paragraph") prepared.youtubeSentenceStarts = article.paragraphSentenceStarts?.[youtubeParagraphIndex++] || [];
-    return prepared;
-  });
+  state.passages = article.kind === "youtube"
+    ? preparedYouTubePassages(article, sourceUrl)
+    : decorateConversationPassages(htmlPassages(article.content, sourceUrl), article.siteName)
+      .map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
   if (!state.passages.length) throw new Error("No readable article text was found.");
   render(metadata, state.passages, sourceUrl);
   $("#play").disabled = false;
   documentReady = true;
   $("#exportPdf").disabled = false;
   await persistDocument({ kind: article.kind === "youtube" ? "youtube" : "article", sourceUrl, metadata, passages: state.passages, language: state.language, summary: null, videoId: article.videoId, duration: article.duration, chapters: article.chapters });
-  void maybeSummarizeAutomatically();
+  updateSummaryControls();
   setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
 }
 
@@ -1605,7 +1973,13 @@ $("#summarize").addEventListener("click", () => {
   summaryStarted = true;
   $("#summaryText").hidden = true;
   $("#summaryLoading").hidden = false;
-  void summarizeLocally();
+  updateSummaryControls();
+  if ($("#summaryProvider").value === "gemma") void summarizeWithGemmaModel();
+  else void summarizeWithChromeApi();
+});
+$("#summaryProvider").addEventListener("change", () => {
+  updateSummaryControls();
+  void savePreferences();
 });
 $("#model").addEventListener("change", (event) => {
   if (state.reading) stopReading();
@@ -1630,6 +2004,7 @@ $("#clearCache").addEventListener("click", async () => {
   button.disabled = true;
   setStatus({ state: "loading", message: "Clearing cached models and voices…" });
   try {
+    clearGemmaSummarizer();
     await Promise.all([inflectTts.clearCache(), pocketTts.clearCache(), caches.delete("transformers-cache")]);
     setStatus({ state: "ready", message: "All cached models and voices cleared" });
   } catch (error) {

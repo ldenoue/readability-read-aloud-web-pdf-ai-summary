@@ -1,7 +1,7 @@
 {
   "name": "readability-read-aloud-extension",
   "private": true,
-  "version": "0.26.0",
+  "version": "0.28.0",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",
@@ -14,6 +14,7 @@
     "@huggingface/transformers": "^3.7.6",
     "@mozilla/readability": "^0.6.0",
     "@orama/orama": "^3.1.18",
+    "defuddle": "^0.19.2",
     "dompdf.js": "^1.3.0",
     "katex": "^0.16.22",
     "linkify-it": "^5.0.2",
@@ -21,7 +22,8 @@
     "marked": "^18.0.7",
     "onnxruntime-web": "1.27.0",
     "pdfjs-dist": "^6.1.200",
-    "phonemizer": "1.2.1"
+    "phonemizer": "1.2.1",
+    "transformers-v4": "npm:@huggingface/transformers@^4.0.0"
   },
   "devDependencies": {
     "esbuild": "0.25.6",

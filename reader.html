@@ -75,14 +75,29 @@
       </aside>
 
       <div class="reading-column">
+        <section id="youtubePlayerPanel" class="youtube-player-panel" hidden>
+          <div class="youtube-player-heading">
+            <strong>Video</strong>
+            <span>Click any transcript sentence to play from that moment</span>
+          </div>
+          <div class="youtube-player-frame">
+            <iframe id="youtubePlayer" title="YouTube video player" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
+          </div>
+        </section>
         <section id="summaryPanel" class="summary-panel" aria-live="polite">
-          <span>Local AI Summary</span>
-          <div id="summaryLoading" class="summary-loading">
+          <div class="summary-heading">
+            <span>Local AI Summary</span>
+            <select id="summaryProvider" aria-label="Local summary model">
+              <option value="chrome" selected>Local Chrome API · speed</option>
+              <option value="gemma">Gemma 3 270M Instruct · WebGPU</option>
+            </select>
+          </div>
+          <div id="summaryLoading" class="summary-loading" hidden>
             <div class="skeleton line"></div>
             <div class="skeleton line"></div>
             <div class="skeleton line short"></div>
           </div>
-          <button id="summarize" class="secondary-button" type="button" hidden>Download &amp; summarize locally</button>
+          <button id="summarize" class="secondary-button" type="button" disabled>Generate local summary</button>
           <p id="summaryText" hidden></p>
         </section>
         <article id="article" aria-live="polite">

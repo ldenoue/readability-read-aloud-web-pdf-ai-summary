@@ -16,15 +16,16 @@
 
 ## What it does
 
-Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Click its toolbar button on an article, PDF, ChatGPT conversation, X long-form article, or YouTube video to open the content in a quiet, responsive reading view.
+Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Click its toolbar button on an article, PDF, AI conversation, email thread, social discussion, GitHub issue, forum topic, X long-form article, or YouTube video to open the content in a quiet, responsive reading view.
 
 - Extracts article content locally with Mozilla Readability.
+- Uses Defuddle's complete site-specific extractor registry for Claude, Gemini, Grok, Gmail, GitHub issues and pull requests, Reddit, Hacker News, Discourse, Bluesky, Threads, Mastodon, LinkedIn, Medium, Substack, Wikipedia, and other supported sites.
 - Extracts X long-form articles from their dedicated rich-text container, including headings, lists, quotations, and images.
 - Turns available YouTube captions and chapters into sentence-aware readable transcripts with speaker turns.
 - Converts PDFs locally with PDF.js and preserves their text hierarchy and reading order.
 - Detects PDF text, headings, pictures, tables, and formulas with a bundled DocLayNet layout model.
 - Converts detected formulas to LaTeX locally and renders them with KaTeX.
-- Produces concise on-device summaries with the browser's built-in Summarizer API when available.
+- Lets users optionally generate an on-device summary with either Chrome's built-in Summarizer API or Gemma 3 270M Instruct running through WebGPU.
 - Reads content aloud with PocketTTS or Inflect Micro/Nano, with selectable voices and sentence-level highlighting.
 - Saves processed articles, PDFs, YouTube transcripts, X articles, and generated local AI summaries so reader tabs survive refreshes without repeating work.
 - Provides a private recent-reading library with Orama full-text and hybrid semantic search across titles, URLs, and content.
@@ -33,6 +34,12 @@ Readability Reader is a Manifest V3 browser extension for Chrome and Firefox. Cl
 - Downloads voice and optional recognition models only when needed, then keeps them in persistent browser storage for reuse.
 
 Article extraction, PDF conversion, layout analysis, transcript formatting, speech synthesis, and supported summarization all happen locally. The extension does not send extracted content to an application server. YouTube metadata and captions are fetched directly from YouTube; model files are downloaded directly from Hugging Face when first required.
+
+## Optional local AI summaries
+
+Summaries are never generated automatically. Choose **Local Chrome API · speed** or **Gemma 3 270M Instruct · WebGPU** in the summary panel, then select the generate button when you want one. Chrome summaries explicitly request its low-latency model preference and do not silently fall back to the larger automatic model. Gemma uses its tokenizer to build focused, grounded source windows; oversized documents use faithful section notes followed by a dedicated final synthesis. The chosen provider is remembered locally, and generated summaries are saved with their documents for refreshes, search results, and PDF exports.
+
+The Chrome option uses the browser's built-in Summarizer API and its supported languages. The WebGPU option runs the q4f16 [Gemma 3 270M Instruct ONNX model](https://huggingface.co/onnx-community/gemma-3-270m-it-ONNX) locally in a dedicated worker with Transformers.js 4. Long documents are summarized in grounded sections and recursively reduced into a final summary. Model files are downloaded only after the user requests a Gemma summary and remain in the browser model cache for reuse.
 
 ## Export to PDF
 
@@ -103,9 +110,11 @@ Saved PDFs include a reprocess button for rerunning extraction after the pipelin
 
 ChatGPT conversation pages use a dedicated extractor that collects every visible user and assistant turn instead of asking generic article heuristics to select one message. Split assistant response fragments are reunited, message roles remain visible, and images and code blocks are retained in the saved, searchable conversation.
 
-For YouTube watch, short, live, embed, and share links, the extension requests available captions directly from YouTube and formats them into complete sentences with `Intl.Segmenter`. Chapter headings move to the end of the sentence containing their timestamp so they do not split speech. A `>>` marker starts an em-dash speaker paragraph only when followed by an uppercase word; false markers inside a sentence are removed.
+For YouTube watch, short, live, embed, and share links, the extension requests available captions directly from YouTube and formats them into complete sentences with `Intl.Segmenter`. The reader embeds the privacy-enhanced YouTube player locally in the transcript view; clicking a timestamped sentence seeks and plays that embedded video without activating or controlling another browser tab, and playback time continuously advances the highlighted transcript sentence. YouTube requires embedded clients to identify themselves, so the extension supplies its Chrome Web Store app identity as the Referer only for YouTube player frames initiated by the extension. Chapter headings move to the end of the sentence containing their timestamp so they do not split speech. A `>>` marker starts an em-dash speaker paragraph only when followed by an uppercase word; false markers inside a sentence are removed.
 
 X long-form articles use the platform's dedicated rich-text article container instead of generic page extraction. The extractor preserves semantic blocks, header and inline images, embedded posts, bold text, and code sections; reads the dedicated article title; resolves author names and handles; replaces emoji images with accessible text; and requests larger X media variants. The ChatGPT and X implementations incorporate robust extraction patterns from Defuddle.
+
+Other supported sites run through Defuddle's maintained browser extractor registry before the generic Readability fallback. Conversation extractors preserve complete Claude, Gemini, and Grok sessions; Gmail removes duplicated quoted history from expanded email threads; GitHub, Reddit, Hacker News, and Discourse retain posts and visible replies; and social extractors preserve multi-post threads, media, quotations, cards, and discussion context. Structured tables and code produced by these extractors remain readable, searchable, locally saved, and available to PDF export.
 
 Image-only scanned PDFs have no extractable text and currently require a separate OCR engine.
 
@@ -116,7 +125,7 @@ Articles, article images, processed PDFs, PDF visual crops, ChatGPT conversation
 ## Third-party components
 
 - [Mozilla Readability](https://github.com/mozilla/readability) for article extraction.
-- [Defuddle](https://github.com/kepano/defuddle) for robust ChatGPT and X/Twitter extraction patterns (MIT).
+- [Defuddle](https://github.com/kepano/defuddle) for its complete maintained registry of conversation, mail, developer, forum, social, video, and publishing extractors (MIT).
 - [PDF.js](https://github.com/mozilla/pdf.js) for PDF parsing and rendering (Apache-2.0).
 - [KaTeX](https://katex.org/) for formula rendering.
 - [Transformers.js](https://github.com/huggingface/transformers.js) and [ONNX Runtime Web](https://github.com/microsoft/onnxruntime) for local document and embedding inference.

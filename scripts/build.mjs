@@ -1,5 +1,5 @@
 import { build } from "esbuild";
-import { readFile, mkdir, copyFile } from "node:fs/promises";
+import { readFile, mkdir, copyFile, rm } from "node:fs/promises";
 import { fileURLToPath } from "node:url";
 import path from "node:path";
 import sharp from "sharp";
@@ -27,6 +27,21 @@ source = source
 
 await mkdir(path.join(extensionDir, "dist"), { recursive: true });
 await mkdir(path.join(extensionDir, "dist", "math-runtime"), { recursive: true });
+await rm(path.join(extensionDir, "dist", "summary-runtime"), { recursive: true, force: true });
+await mkdir(path.join(extensionDir, "dist", "summary-runtime"), { recursive: true });
+// Transformers' ONNX bundle dynamically imports one of these local runtime
+// modules. Keep both the module and its matching WASM binary in the extension;
+// wasmPaths alone does not make the dynamically imported JS available.
+const summaryRuntimeFiles = [
+  "ort-wasm-simd-threaded.asyncify.mjs",
+  "ort-wasm-simd-threaded.asyncify.wasm",
+  "ort-wasm-simd-threaded.mjs",
+  "ort-wasm-simd-threaded.wasm",
+];
+await Promise.all(summaryRuntimeFiles.map((file) => copyFile(
+  path.join(extensionDir, "node_modules", "transformers-v4", "node_modules", "onnxruntime-web", "dist", file),
+  path.join(extensionDir, "dist", "summary-runtime", file),
+)));
 await copyFile(
   path.join(extensionDir, "node_modules", "marked", "lib", "marked.esm.js"),
   path.join(extensionDir, "dist", "marked.esm.js"),
@@ -50,6 +65,17 @@ await build({
   platform: "browser",
   target: ["chrome120"],
   outfile: path.join(extensionDir, "dist", "readability.js"),
+  legalComments: "eof",
+});
+
+await build({
+  entryPoints: [path.join(extensionDir, "defuddle-entry.js")],
+  bundle: true,
+  minify: true,
+  format: "iife",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "defuddle.js"),
   legalComments: "eof",
 });
 
@@ -138,6 +164,17 @@ await build({
   platform: "browser",
   target: ["chrome120"],
   outfile: path.join(extensionDir, "dist", "embedding-worker.js"),
+  legalComments: "eof",
+});
+
+await build({
+  entryPoints: [path.join(extensionDir, "summary-worker.js")],
+  bundle: true,
+  minify: true,
+  format: "esm",
+  platform: "browser",
+  target: ["chrome120"],
+  outfile: path.join(extensionDir, "dist", "summary-worker.js"),
   legalComments: "eof",
 });
 

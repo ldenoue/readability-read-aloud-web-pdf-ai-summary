@@ -1,5 +1,34 @@
 import { getLocalYouTubeTranscript, youtubeTranscriptArticle, youtubeVideoId } from "./youtube-transcript.js";
 
+const YOUTUBE_IDENTITY_RULE = 153001;
+const YOUTUBE_APP_IDENTITY = "https://readability-read-aloud.gpgkihaonhnhfabcmgnmkjlmoegfkbne/";
+
+async function configureYouTubeEmbedIdentity() {
+  if (!chrome.declarativeNetRequest?.updateDynamicRules) return;
+  try {
+    await chrome.declarativeNetRequest.updateDynamicRules({
+      removeRuleIds: [YOUTUBE_IDENTITY_RULE],
+      addRules: [{
+        id: YOUTUBE_IDENTITY_RULE,
+        priority: 1,
+        action: {
+          type: "modifyHeaders",
+          requestHeaders: [{ header: "Referer", operation: "set", value: YOUTUBE_APP_IDENTITY }],
+        },
+        condition: {
+          requestDomains: ["youtube.com", "youtube-nocookie.com"],
+          initiatorDomains: [chrome.runtime.id],
+          resourceTypes: ["sub_frame"],
+        },
+      }],
+    });
+  } catch (error) {
+    console.warn("Could not configure YouTube embed identity:", error);
+  }
+}
+
+void configureYouTubeEmbedIdentity();
+
 async function pointsToPdf(url) {
   if (/\.pdf(?:$|[?#])/i.test(url)) return true;
   try {
@@ -45,10 +74,10 @@ chrome.action.onClicked.addListener(async (tab) => {
   }
 
   try {
-    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["dist/readability.js"] });
+    await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ["dist/readability.js", "dist/defuddle.js"] });
     const [{ result: article }] = await chrome.scripting.executeScript({
       target: { tabId: tab.id },
-      func: () => {
+      func: async () => {
         const articleResult = ({ title, byline = "", siteName, publishedTime = "", content, kind = "article" }) => {
           const container = document.createElement("div");
           container.innerHTML = content;
@@ -127,6 +156,46 @@ chrome.action.onClicked.addListener(async (tab) => {
           });
         }
 
+        const isGmail = /^(?:mail\.)?google\.com$/i.test(location.hostname) && location.pathname.startsWith("/mail/");
+        const gmailRows = isGmail ? [...document.querySelectorAll(".adn.ads")] : [];
+        if (gmailRows.length) {
+          const thread = document.createElement("article");
+          thread.className = "gmail-thread";
+          const removeFromMessage = [
+            ".gmail_quote", ".gmail_attr", ".gmail_extra", "blockquote[type='cite']", ".moz-cite-prefix",
+            "blockquote[style*='border-left']", ".yahoo_quoted", ".a6S", ".adL", ".h5", ".adm",
+            ".ajR", ".ajT", ".h4", ".yj6qo",
+          ].join(",");
+          for (const row of gmailRows) {
+            const body = row.querySelector(".a3s");
+            if (!body) continue;
+            const content = body.cloneNode(true);
+            content.classList.add("comment-content");
+            content.querySelectorAll(removeFromMessage).forEach((element) => element.remove());
+            if (!content.textContent.trim() && !content.querySelector("img, video, audio, table, pre")) continue;
+            const section = document.createElement("section");
+            section.className = "gmail-message";
+            const sender = row.querySelector(".gD");
+            const author = sender?.getAttribute("name")?.trim() || sender?.textContent.trim() || "Unknown sender";
+            const date = row.querySelector(".g3")?.getAttribute("title")?.trim() || row.querySelector(".g3")?.textContent.trim() || "";
+            const heading = document.createElement("h2");
+            heading.textContent = date ? `${author} - ${date}` : author;
+            section.append(heading, ...content.childNodes);
+            thread.append(section);
+          }
+          if (thread.childElementCount) {
+            const subject = document.querySelector("h2.hP, .hP")?.textContent.replace(/\s+/g, " ").trim() || document.title.replace(/\s+-\s+Gmail\s*$/i, "").trim() || "Gmail thread";
+            const firstSender = gmailRows[0]?.querySelector(".gD");
+            return articleResult({
+              title: subject,
+              byline: firstSender?.getAttribute("name")?.trim() || firstSender?.textContent.trim() || "",
+              siteName: "Gmail",
+              content: thread.outerHTML,
+              kind: "gmail",
+            });
+          }
+        }
+
         const isXArticle = /^(?:www\.)?x\.com$/i.test(location.hostname);
         const richText = isXArticle
           ? document.querySelector('[data-testid="twitterArticleRichTextView"]')
@@ -197,6 +266,31 @@ chrome.action.onClicked.addListener(async (tab) => {
             || "";
           const byline = [displayName, handle].filter(Boolean).join(" ");
           return articleResult({ title, byline, siteName: "X", publishedTime: document.querySelector("time[datetime]")?.getAttribute("datetime") || "", content: content.innerHTML, kind: "x-article" });
+        }
+
+        try {
+          const defuddle = new globalThis.__LocalDefuddle(document.cloneNode(true), {
+            url: location.href,
+            includeReplies: "extractors",
+            removeImages: false,
+            useAsync: true,
+          });
+          const extracted = await defuddle.parseAsync();
+          if (extracted?.extractorType && extracted.content?.trim()) {
+            const geminiBrowserTitle = /^(?:gemini\.google\.com)$/i.test(location.hostname)
+              ? document.title.replace(/\s+-\s+Google Gemini\s*$/i, "").trim()
+              : "";
+            return articleResult({
+              title: geminiBrowserTitle && !/^(?:New Chat|Gemini)$/i.test(geminiBrowserTitle) ? geminiBrowserTitle : extracted.title || document.title,
+              byline: extracted.author || "",
+              siteName: extracted.site || extracted.domain || location.hostname,
+              publishedTime: extracted.published || "",
+              content: extracted.content,
+              kind: `defuddle-${extracted.extractorType}`,
+            });
+          }
+        } catch (error) {
+          console.warn("Defuddle extractor failed; falling back to Readability:", error);
         }
         const parsed = new globalThis.__LocalReadability(document.cloneNode(true)).parse();
         delete globalThis.__LocalReadability;
