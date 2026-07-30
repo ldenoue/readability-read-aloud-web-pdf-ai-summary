@@ -96,9 +96,9 @@ self.onmessage = async ({ data }) => {
           }
           catch (error) { self.postMessage({ type: "table-warning", message: error instanceof Error ? error.message : String(error) }); }
         }
-        const bytes = new Uint8Array(await (await crop.convertToBlob({ type: "image/png" })).arrayBuffer());
-        blocks.push({ type: table ? "table" : "image", bytes, mime: "image/png", width: cropWidth, height: cropHeight, label: visual.label, latex, table, ...visual });
-        transfers.push(bytes.buffer);
+        const bytes = table ? null : new Uint8Array(await (await crop.convertToBlob({ type: "image/png" })).arrayBuffer());
+        blocks.push({ type: table ? "table" : "image", ...(bytes ? { bytes, mime: "image/png" } : {}), width: cropWidth, height: cropHeight, label: visual.label, latex, table, ...visual });
+        if (bytes) transfers.push(bytes.buffer);
       }
       blocks = xyCut(blocks).map((block) => {
         const isPageNumber = block.type === "text" && /^(?:\d{1,4}|[ivxlcdm]{1,8})$/i.test(block.text.trim())

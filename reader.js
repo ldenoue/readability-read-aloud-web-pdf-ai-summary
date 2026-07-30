@@ -690,8 +690,7 @@ function pdfBlockPassages(pages) {
         && block.layout.y1 >= block.layout.pageHeight * 0.78;
       if (block.isPageNumber || lowerMarginNumber) continue;
       if (block.type === "table" && block.table?.rows?.length) {
-        const src = block.bytes ? URL.createObjectURL(new Blob([block.bytes], { type: block.mime || "image/png" })) : "";
-        passages.push({ type: "table", text: "", table: block.table, image: src ? { src, alt: "Original PDF table", width: block.width, height: block.height } : null, page: page.page, layout: block.layout });
+        passages.push({ type: "table", text: "", table: block.table, page: page.page, layout: block.layout });
         continue;
       }
       if (block.type === "image" && block.bytes) {
@@ -861,6 +860,39 @@ function removeRepeatedPdfMarginals(passages) {
       && text.length <= 120;
     return !likelyRunningHeaderOrFooter;
   });
+}
+
+function removePdfTableOfContents(passages) {
+  const heading = passages.find((passage) => passage.pdfText
+    && Number.isInteger(passage.page)
+    && /^(?:table\s+of\s+)?contents?\s*$/iu.test(String(passage.text || "").trim()));
+  if (!heading) return passages;
+
+  const startPage = heading.page;
+  const lastPage = Math.max(...passages.map((passage) => Number.isInteger(passage.page) ? passage.page : 0));
+  const nearbyTables = passages.filter((passage) => passage.type === "table"
+    && passage.page >= startPage && passage.page <= startPage + 8);
+  const destinationPages = nearbyTables.flatMap((passage) => passage.table?.rows || []).flatMap((row) => {
+    const lastCell = [...(row.cells || [])].reverse().find((cell) => String(cell.text || "").trim());
+    const match = String(lastCell?.text || "").trim().match(/^(\d{1,4})$/u);
+    return match ? [Number(match[1])] : [];
+  }).filter((page) => page > startPage && page <= lastPage);
+
+  const firstDestination = destinationPages.length ? Math.min(...destinationPages) : null;
+  let endPage = firstDestination && firstDestination <= startPage + 12 ? firstDestination - 1 : startPage;
+  if (!firstDestination) {
+    for (let page = startPage + 1; page <= Math.min(lastPage, startPage + 8); page++) {
+      const pagePassages = passages.filter((passage) => passage.page === page);
+      const tableRows = pagePassages.filter((passage) => passage.type === "table").flatMap((passage) => passage.table?.rows || []);
+      const numberedRows = tableRows.filter((row) => /\d{1,4}\s*$/u.test(String(row.cells?.at(-1)?.text || "").trim()));
+      const textEntries = pagePassages.filter((passage) => passage.pdfText
+        && /^\s*\d+(?:\.\d+)*\s+.+?\s+\d{1,4}\s*$/u.test(String(passage.text || "")));
+      const tableLooksLikeContents = tableRows.length >= 3 && numberedRows.length / tableRows.length >= 0.5;
+      if (!tableLooksLikeContents && textEntries.length < 3) break;
+      endPage = page;
+    }
+  }
+  return passages.filter((passage) => !Number.isInteger(passage.page) || passage.page < startPage || passage.page > endPage);
 }
 
 const PDF_PREPOSED_DIACRITICS = new Map([
@@ -1346,17 +1378,6 @@ function render(metadata, passages, sourceUrl) {
         table.append(tr);
       }
       element.append(table);
-      if (passage.image?.src) {
-        const details = document.createElement("details");
-        const summary = document.createElement("summary");
-        summary.textContent = "Show original table image";
-        const image = document.createElement("img");
-        image.src = passage.image.src;
-        image.alt = passage.image.alt;
-        preserveImageAspectRatio(image, passage.image);
-        details.append(summary, image);
-        element.append(details);
-      }
     } else if (passage.type === "formula") {
       element.classList.add("formula");
       const math = document.createElement("div");
@@ -1951,7 +1972,7 @@ async function loadArticle() {
       state.passages = rawPassages.map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     }
     if (extracted.format === "blocks") {
-      state.passages = mergePdfColumnContinuations(removeRepeatedPdfMarginals(state.passages))
+      state.passages = mergePdfColumnContinuations(removePdfTableOfContents(removeRepeatedPdfMarginals(state.passages)))
         .map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     }
     if (!state.passages.length) throw new Error("This PDF contains no extractable text. Scanned PDFs require OCR.");
