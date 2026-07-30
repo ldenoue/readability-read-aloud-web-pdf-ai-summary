@@ -742,17 +742,33 @@ function mergePdfColumnContinuations(passages) {
     const jumpsToNextColumn = samePage && pageWidth > 0
       && passage.layout.x1 > previous.layout.x1 + pageWidth * 0.18
       && passage.layout.y1 < previous.layout.y1;
-    const startsMidSentence = sameTextFlow && /^(?:[“‘"']\s*)?\p{Ll}/u.test(passage.text);
+    const startsLowercase = sameTextFlow && /^(?:[“‘"']\s*)?\p{Ll}/u.test(passage.text);
+    const startsCitationYear = sameTextFlow && /^(?:[\[(]\s*)?(?:19|20)\d{2}\b/u.test(passage.text)
+      && /(?:\bet al\.,|[,\[(])\s*$/iu.test(previous?.text || "");
+    const startsMidSentence = startsLowercase || startsCitationYear;
     const previousWithoutTrailingCitations = previous?.text.replace(/(?:\s*\[[\d,;\s-]+\])+\s*$/u, "").trim() || "";
     const previousSentenceFinished = /[.!?…:;][”’"')\]]?$/u.test(previousWithoutTrailingCitations);
     const crossesPage = sameTextFlow && passage.page === previous.page + 1;
     const sentenceContinues = startsMidSentence || !previousSentenceFinished;
+    const previousWidth = previous?.layout ? previous.layout.x2 - previous.layout.x1 : 0;
+    const passageWidth = passage.layout ? passage.layout.x2 - passage.layout.x1 : 0;
+    const horizontalOverlap = previous?.layout && passage.layout
+      ? Math.max(0, Math.min(previous.layout.x2, passage.layout.x2) - Math.max(previous.layout.x1, passage.layout.x1))
+      : 0;
+    const sameColumn = samePage && Math.min(previousWidth, passageWidth) > 0
+      && horizontalOverlap / Math.min(previousWidth, passageWidth) >= 0.5;
+    const verticalGap = samePage ? passage.layout.y1 - previous.layout.y2 : Number.POSITIVE_INFINITY;
+    const nearbyInColumn = sameColumn && verticalGap >= -12
+      && verticalGap <= Math.max(36, (passage.layout.pageHeight || 0) * 0.04);
     const hyphenated = /-$/u.test(previous?.text || "") && /^\p{Ll}/u.test(passage.text);
+    const samePageHyphen = !crossedVisuals && samePage && sameColumn && hyphenated;
     const uninterruptedContinuation = !crossedVisuals
-      && sentenceContinues && (jumpsToNextColumn || startsMidSentence && (samePage || crossesPage));
+      && sentenceContinues && (jumpsToNextColumn || startsMidSentence && (nearbyInColumn || crossesPage));
     const interruptedPageHyphen = crossedVisuals && crossesPage && startsMidSentence && hyphenated;
-    if (uninterruptedContinuation || interruptedPageHyphen) {
-      const prefix = previous.text.replace(hyphenated ? /-$/u : /$/u, "");
+    if (uninterruptedContinuation || interruptedPageHyphen || samePageHyphen) {
+      const interruptedWord = previous.text.match(/([\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*)-$/u)?.[1] || "";
+      const keepCompoundHyphen = hyphenated && interruptedWord.includes("-");
+      const prefix = previous.text.replace(hyphenated && !keepCompoundHyphen ? /-$/u : /$/u, "");
       const separator = hyphenated ? "" : " ";
       const rangeOffset = prefix.length + separator.length;
       previous.text = `${prefix}${separator}${passage.text}`;
