@@ -684,7 +684,11 @@ function pdfBlockPassages(pages) {
   const passages = [];
   for (const page of pages) {
     for (const block of page.blocks || []) {
-      if (block.isPageNumber) continue;
+      const lowerMarginNumber = block.type === "text"
+        && /^(?:\d{1,4}|[ivxlcdm]{1,8})$/iu.test(String(block.text || "").trim())
+        && block.layout?.pageHeight > 0
+        && block.layout.y1 >= block.layout.pageHeight * 0.78;
+      if (block.isPageNumber || lowerMarginNumber) continue;
       if (block.type === "table" && block.table?.rows?.length) {
         const src = block.bytes ? URL.createObjectURL(new Blob([block.bytes], { type: block.mime || "image/png" })) : "";
         passages.push({ type: "table", text: "", table: block.table, image: src ? { src, alt: "Original PDF table", width: block.width, height: block.height } : null, page: page.page, layout: block.layout });

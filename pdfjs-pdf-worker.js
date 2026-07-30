@@ -97,7 +97,8 @@ self.onmessage = async ({ data }) => {
         transfers.push(bytes.buffer);
       }
       blocks = xyCut(blocks).map((block) => {
-        const isPageNumber = block.type === "text" && /^(?:\d{1,4}|[ivxlcdm]{1,8})$/i.test(block.text.trim()) && (block.y1 <= height * 0.1 || block.y2 >= height * 0.9);
+        const isPageNumber = block.type === "text" && /^(?:\d{1,4}|[ivxlcdm]{1,8})$/i.test(block.text.trim())
+          && (block.y1 <= height * 0.1 || block.y2 >= height * 0.82);
         const { x1, y1, x2, y2, ...clean } = block;
         return { ...clean, isPageNumber, layout: { x1, y1, x2, y2, pageWidth: width, pageHeight: height } };
       });
@@ -171,7 +172,18 @@ function splitItemTokens(item) {
 }
 
 function liftPdfTextRegions(tokens, regions, visuals) {
-  const horizontal = tokens.filter((token) => token.isHorizontal && !visuals.some((visual) => containment(token, visual) >= 0.5));
+  // Layout boxes hug the visible formula body, while PDF text glyph boxes for
+  // radicals, scalable delimiters, scripts, and equation numbers often extend
+  // just beyond it. Use a padded box only for suppressing duplicate text; keep
+  // the original detection unchanged for cropping and math recognition.
+  const textExclusions = visuals.map((visual) => {
+    if (visual.label !== "Formula") return visual;
+    const visualHeight = Math.max(1, visual.y2 - visual.y1);
+    const padX = Math.max(12, Math.min(48, visualHeight * 0.75));
+    const padY = Math.max(8, Math.min(28, visualHeight * 0.35));
+    return { ...visual, x1: visual.x1 - padX, y1: visual.y1 - padY, x2: visual.x2 + padX, y2: visual.y2 + padY };
+  });
+  const horizontal = tokens.filter((token) => token.isHorizontal && !textExclusions.some((visual) => containment(token, visual) >= 0.35));
   const claimed = new Set();
   const blocks = [];
   for (const region of regions) {
@@ -206,18 +218,45 @@ function liftPdfTextRegions(tokens, regions, visuals) {
 }
 
 function tokenRows(tokens) {
+  const ordered = tokens.slice().sort((a, b) => centerY(a) - centerY(b) || a.y1 - b.y1 || a.x1 - b.x1);
+  const fontSizes = ordered.map((token) => token.fontSize).sort((a, b) => a - b);
+  const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] || 1;
+  const isAuxiliary = (token) => token.isMath
+    || /[√∛∜∫∮∑∏]/u.test(token.text)
+    || token.fontSize <= medianFontSize * 0.88;
+  const primary = ordered.filter((token) => !isAuxiliary(token));
+  const auxiliary = ordered.filter(isAuxiliary);
   const rows = [];
-  for (const token of tokens.slice().sort((a, b) => centerY(a) - centerY(b) || a.y1 - b.y1 || a.x1 - b.x1)) {
-    const row = rows.find((candidate) => Math.abs(centerY(token) - candidate.centerY) <= Math.max(2, Math.min(height(token), candidate.medianHeight) * 0.65)
-      || verticalOverlap(token, candidate) >= 0.5
-      || Math.abs(token.baselineY - candidate.medianBaseline) <= Math.max(token.fontSize, candidate.medianFontSize) * 0.45);
+  for (const token of primary.length ? primary : ordered) {
+    const candidates = rows.filter((candidate) => Math.abs(token.baselineY - candidate.medianBaseline) <= Math.max(token.fontSize, candidate.medianFontSize) * 0.38
+      && Math.abs(centerY(token) - candidate.centerY) <= Math.max(2, Math.min(height(token), candidate.medianHeight) * 0.72));
+    const row = candidates.sort((left, right) => rowTokenAffinity(token, left) - rowTokenAffinity(token, right))[0];
     if (row) { row.tokens.push(token); updateRow(row); }
     else { const created = { tokens: [token] }; updateRow(created); rows.push(created); }
+  }
+  if (primary.length) {
+    for (const token of auxiliary) {
+      const candidates = rows.filter((candidate) => Math.abs(token.baselineY - candidate.medianBaseline)
+        <= Math.max(token.fontSize, candidate.medianFontSize) * 1.05);
+      const row = (candidates.length ? candidates : rows)
+        .slice().sort((left, right) => rowTokenAffinity(token, left) - rowTokenAffinity(token, right))[0];
+      if (row) { row.tokens.push(token); updateRow(row); }
+      else { const created = { tokens: [token] }; updateRow(created); rows.push(created); }
+    }
   }
   return rows.sort((a, b) => a.centerY - b.centerY || a.top - b.top).map((row) => row.tokens.sort((a, b) => a.x1 - b.x1 || a.itemIndex - b.itemIndex || a.tokenIndex - b.tokenIndex));
 }
 
+function rowTokenAffinity(token, row) {
+  const fontSize = Math.max(1, token.fontSize, row.medianFontSize);
+  const baselineDistance = Math.abs(token.baselineY - row.medianBaseline) / fontSize;
+  const centerDistance = Math.abs(centerY(token) - row.centerY) / Math.max(1, Math.min(height(token), row.medianHeight));
+  const horizontalDistance = token.x2 < row.left ? row.left - token.x2 : token.x1 > row.right ? token.x1 - row.right : 0;
+  return baselineDistance * 4 + centerDistance + horizontalDistance / fontSize * 0.08;
+}
+
 function joinRowTokens(tokens) {
+  tokens = repairCombiningOverlayOrder(tokens);
   const fontSizes = tokens.map((token) => token.fontSize).sort((a, b) => a - b);
   const medianFontSize = fontSizes[Math.floor(fontSizes.length / 2)] || 1;
   const normalTokens = tokens.filter((token) => token.fontSize >= medianFontSize * 0.9);
@@ -244,10 +283,47 @@ function joinRowTokens(tokens) {
   return text;
 }
 
+function repairCombiningOverlayOrder(tokens) {
+  const repaired = [];
+  for (let index = 0; index < tokens.length; index++) {
+    const token = tokens[index];
+    const next = tokens[index + 1];
+    // Some embedded math fonts expose a rendered negated operator as a
+    // zero-width U+0338 glyph followed by its base operator at the same x
+    // position. Put the base first so Unicode normalization can compose, for
+    // example, PDF.js's "\u0338" + "=" into the rendered "≠".
+    if (token.text === "\u0338" && next) {
+      const tolerance = Math.max(1, token.fontSize, next.fontSize) * 0.2;
+      if (Math.abs(token.x1 - next.x1) <= tolerance) {
+        repaired.push({ ...next, text: `${next.text}\u0338`.normalize("NFC") });
+        index++;
+        continue;
+      }
+    }
+    // A few TeX fonts map that same slash glyph to the character code for
+    // "6" in PDF.js's text layer. It is distinguishable from a real six
+    // because its box is painted on top of the equals sign, not before it.
+    if (token.text === "6" && next?.text.startsWith("=")) {
+      const overlap = Math.max(0, Math.min(token.x2, next.x2) - Math.max(token.x1, next.x1));
+      const narrowerWidth = Math.max(1, Math.min(token.x2 - token.x1, next.x2 - next.x1));
+      const sameBaseline = Math.abs(token.baselineY - next.baselineY) <= Math.max(token.fontSize, next.fontSize) * 0.2;
+      if (overlap / narrowerWidth >= 0.6 && sameBaseline) {
+        repaired.push({ ...next, text: `≠${next.text.slice(1)}` });
+        index++;
+        continue;
+      }
+    }
+    repaired.push(token);
+  }
+  return repaired;
+}
+
 function updateRow(row) {
   row.top = Math.min(...row.tokens.map((token) => token.y1));
   row.y1 = row.top;
   row.y2 = Math.max(...row.tokens.map((token) => token.y2));
+  row.left = Math.min(...row.tokens.map((token) => token.x1));
+  row.right = Math.max(...row.tokens.map((token) => token.x2));
   row.centerY = row.tokens.reduce((sum, token) => sum + centerY(token) * height(token), 0) / row.tokens.reduce((sum, token) => sum + height(token), 0);
   const heights = row.tokens.map(height).sort((a, b) => a - b);
   row.medianHeight = heights[Math.floor(heights.length / 2)];
@@ -270,10 +346,6 @@ function containment(inner, outer) {
 
 const centerY = (item) => (item.y1 + item.y2) / 2;
 const height = (item) => Math.max(1, item.y2 - item.y1);
-function verticalOverlap(left, right) {
-  const overlap = Math.max(0, Math.min(left.y2, right.y2) - Math.max(left.y1, right.y1));
-  return overlap / Math.max(1, Math.min(height(left), height(right)));
-}
 
 function padTableCanvas(source) {
   const padX = Math.min(48, Math.max(12, Math.round(source.width * 0.04)));
