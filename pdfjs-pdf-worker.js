@@ -53,13 +53,17 @@ self.onmessage = async ({ data }) => {
       await page.render({ canvasContext: context, viewport }).promise;
       const imageData = context.getImageData(0, 0, width, height);
       const detections = await detector.detect(imageData.data, width, height);
-      const visuals = visualDetections(detections);
+      let visuals = visualDetections(detections);
       const textRegions = detections.filter((region) => ["Text", "Title", "Section-header", "Caption", "Footnote", "List-item"].includes(region.label));
       const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
       const tokens = pdfTokens(content, viewport, (fontName) => {
         try { return page.commonObjs?.has(fontName) ? page.commonObjs.get(fontName) : null; }
         catch { return null; }
       });
+      // YOLO occasionally labels a single inline radical as a Formula. Keep
+      // the positioned PDF glyph in that case; treating it as a visual would
+      // remove it from the sentence and create a detached OCR formula block.
+      visuals = visuals.filter((visual) => !isInlinePdfMathDetection(visual, tokens));
       let blocks = liftPdfTextRegions(tokens, textRegions, visuals);
 
       for (const visual of visuals) {
@@ -171,6 +175,21 @@ function splitItemTokens(item) {
   });
 }
 
+function isInlinePdfMathDetection(visual, tokens) {
+  if (visual.label !== "Formula") return false;
+  const nearby = tokens.filter((token) => containment(token, visual) >= 0.15
+    || ((token.x1 + token.x2) / 2 >= visual.x1 && (token.x1 + token.x2) / 2 <= visual.x2
+      && centerY(token) >= visual.y1 && centerY(token) <= visual.y2));
+  const radical = nearby.find((token) => /[√∛∜]/u.test(token.text));
+  if (!radical || visual.x2 - visual.x1 > radical.fontSize * 4.5) return false;
+
+  const adjacent = tokens.filter((token) => token !== radical
+    && Math.abs(token.itemIndex - radical.itemIndex) <= 2
+    && Math.abs(token.baselineY - radical.baselineY) <= radical.fontSize * 1.2);
+  return adjacent.some((token) => token.itemIndex < radical.itemIndex && token.x1 <= radical.x1)
+    && adjacent.some((token) => token.itemIndex > radical.itemIndex && token.x2 >= radical.x2);
+}
+
 function liftPdfTextRegions(tokens, regions, visuals) {
   // Layout boxes hug the visible formula body, while PDF text glyph boxes for
   // radicals, scalable delimiters, scripts, and equation numbers often extend
@@ -183,11 +202,16 @@ function liftPdfTextRegions(tokens, regions, visuals) {
     const padY = Math.max(8, Math.min(28, visualHeight * 0.35));
     return { ...visual, x1: visual.x1 - padX, y1: visual.y1 - padY, x2: visual.x2 + padX, y2: visual.y2 + padY };
   });
-  const horizontal = tokens.filter((token) => token.isHorizontal && !textExclusions.some((visual) => containment(token, visual) >= 0.35));
+  const horizontal = tokens.filter((token) => {
+    if (!token.isHorizontal) return false;
+    const protectedInlineMath = isProtectedInlineMathToken(token, tokens, regions);
+    return protectedInlineMath || !textExclusions.some((visual) => containment(token, visual) >= 0.35);
+  });
+  const regionAssignments = new Map(horizontal.map((token) => [token, bestTextRegion(token, regions)]));
   const claimed = new Set();
   const blocks = [];
   for (const region of regions) {
-    const regionTokens = horizontal.filter((token) => !claimed.has(token) && containment(token, region) >= 0.35);
+    const regionTokens = horizontal.filter((token) => !claimed.has(token) && regionAssignments.get(token) === region);
     if (!regionTokens.length) continue;
     regionTokens.forEach((token) => claimed.add(token));
     const rows = tokenRows(regionTokens);
@@ -217,6 +241,48 @@ function liftPdfTextRegions(tokens, regions, visuals) {
   return blocks;
 }
 
+function isProtectedInlineMathToken(token, tokens, regions) {
+  if (!/[√∛∜]/u.test(token.text) || !regions.some((region) => tokenBelongsToTextRegion(token, region))) return false;
+  const adjacent = tokens.filter((candidate) => candidate !== token
+    && Math.abs(candidate.itemIndex - token.itemIndex) <= 2
+    && Math.abs(candidate.baselineY - token.baselineY) <= token.fontSize * 1.2);
+  return adjacent.some((candidate) => candidate.itemIndex < token.itemIndex && candidate.x1 <= token.x1)
+    && adjacent.some((candidate) => candidate.itemIndex > token.itemIndex && candidate.x2 >= token.x2);
+}
+
+function bestTextRegion(token, regions) {
+  return regions.filter((region) => tokenBelongsToTextRegion(token, region))
+    .sort((left, right) => textRegionAffinity(token, right) - textRegionAffinity(token, left))[0] || null;
+}
+
+function textRegionAffinity(token, region) {
+  const overlapScore = containment(token, region) * 100;
+  const centerX = (token.x1 + token.x2) / 2;
+  const center = centerY(token);
+  const dx = centerX < region.x1 ? region.x1 - centerX : centerX > region.x2 ? centerX - region.x2 : 0;
+  const dy = center < region.y1 ? region.y1 - center : center > region.y2 ? center - region.y2 : 0;
+  return overlapScore - Math.hypot(dx, dy) / Math.max(1, token.fontSize);
+}
+
+function tokenBelongsToTextRegion(token, region) {
+  if (containment(token, region) >= 0.35) return true;
+  const isMathAuxiliary = token.isMath || /[√∛∜∫∮∑∏]/u.test(token.text);
+  if (!isMathAuxiliary) return false;
+
+  // TeX radicals and scalable operators commonly have an origin/baseline well
+  // outside their visible ink. YOLO still groups them with the prose line, but
+  // their PDF.js box can miss the detected Text rectangle. Associate such a
+  // glyph with a nearby region using its horizontal position and a font-sized
+  // vertical allowance; its x coordinate can then order it within the row.
+  const centerX = (token.x1 + token.x2) / 2;
+  const horizontalAllowance = Math.max(2, token.fontSize * 0.4);
+  const verticalAllowance = Math.max(3, token.fontSize * 1.15);
+  return centerX >= region.x1 - horizontalAllowance
+    && centerX <= region.x2 + horizontalAllowance
+    && token.y2 >= region.y1 - verticalAllowance
+    && token.y1 <= region.y2 + verticalAllowance;
+}
+
 function tokenRows(tokens) {
   const ordered = tokens.slice().sort((a, b) => centerY(a) - centerY(b) || a.y1 - b.y1 || a.x1 - b.x1);
   const fontSizes = ordered.map((token) => token.fontSize).sort((a, b) => a - b);
@@ -239,7 +305,7 @@ function tokenRows(tokens) {
       const candidates = rows.filter((candidate) => Math.abs(token.baselineY - candidate.medianBaseline)
         <= Math.max(token.fontSize, candidate.medianFontSize) * 1.05);
       const row = (candidates.length ? candidates : rows)
-        .slice().sort((left, right) => rowTokenAffinity(token, left) - rowTokenAffinity(token, right))[0];
+        .slice().sort((left, right) => auxiliaryRowAffinity(token, left) - auxiliaryRowAffinity(token, right))[0];
       if (row) { row.tokens.push(token); updateRow(row); }
       else { const created = { tokens: [token] }; updateRow(created); rows.push(created); }
     }
@@ -253,6 +319,14 @@ function rowTokenAffinity(token, row) {
   const centerDistance = Math.abs(centerY(token) - row.centerY) / Math.max(1, Math.min(height(token), row.medianHeight));
   const horizontalDistance = token.x2 < row.left ? row.left - token.x2 : token.x1 > row.right ? token.x1 - row.right : 0;
   return baselineDistance * 4 + centerDistance + horizontalDistance / fontSize * 0.08;
+}
+
+function auxiliaryRowAffinity(token, row) {
+  // PDF content order remains reliable for many TeX glyphs whose reported
+  // baseline does not. A radical normally sits between the adjacent `i` and
+  // radicand items, so prefer the row containing neighboring item indices.
+  const sequenceDistance = Math.min(...row.tokens.map((candidate) => Math.abs(candidate.itemIndex - token.itemIndex)));
+  return rowTokenAffinity(token, row) + sequenceDistance * 2;
 }
 
 function joinRowTokens(tokens) {

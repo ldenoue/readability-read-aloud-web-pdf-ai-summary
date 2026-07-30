@@ -2065,6 +2065,8 @@ $("#clearCache").addEventListener("click", async () => {
   }
 });
 $("#article").addEventListener("click", (event) => {
+  const selection = window.getSelection();
+  if (selection && !selection.isCollapsed && selection.toString().trim()) return;
   if (event.target.closest("a.pdf-external-link")) return;
   const citation = event.target.closest("a.pdf-citation");
   if (citation) {
@@ -2082,7 +2084,8 @@ $("#article").addEventListener("click", (event) => {
   const passage = event.target.closest(".passage");
   if (!passage) return;
   const sentence = event.target.closest(".sentence");
-  readFromPosition(Number(passage.dataset.index), sentence ? Number(sentence.dataset.sentence) : 0);
+  if (!sentence) return;
+  readFromPosition(Number(passage.dataset.index), Number(sentence.dataset.sentence));
 });
 $("#article").addEventListener("mouseover", (event) => {
   const citation = event.target.closest("a.pdf-citation[href^='#pdf-']");
