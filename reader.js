@@ -895,6 +895,31 @@ function removePdfTableOfContents(passages) {
   return passages.filter((passage) => !Number.isInteger(passage.page) || passage.page < startPage || passage.page > endPage);
 }
 
+function startsPdfTableOfContents(passages) {
+  return passages.some((passage) => passage.pdfText
+    && /^(?:table\s+of\s+)?contents?\s*$/iu.test(String(passage.text || "").trim()));
+}
+
+function pdfTableOfContentsDestinations(passages) {
+  return passages.filter((passage) => passage.type === "table").flatMap((passage) => passage.table?.rows || []).flatMap((row) => {
+    const lastCell = [...(row.cells || [])].reverse().find((cell) => String(cell.text || "").trim());
+    const match = String(lastCell?.text || "").trim().match(/^(\d{1,4})$/u);
+    return match ? [Number(match[1])] : [];
+  });
+}
+
+function looksLikePdfTableOfContentsPage(passages) {
+  const tableRows = passages.filter((passage) => passage.type === "table").flatMap((passage) => passage.table?.rows || []);
+  const numberedRows = tableRows.filter((row) => {
+    const lastCell = [...(row.cells || [])].reverse().find((cell) => String(cell.text || "").trim());
+    return /^\d{1,4}$/u.test(String(lastCell?.text || "").trim());
+  });
+  if (tableRows.length >= 3 && numberedRows.length / tableRows.length >= 0.5) return true;
+  const textEntries = passages.filter((passage) => passage.pdfText
+    && /^\s*\d+(?:\.\d+)*\s+.+?\s+\d{1,4}\s*$/u.test(String(passage.text || "")));
+  return textEntries.length >= 3;
+}
+
 const PDF_PREPOSED_DIACRITICS = new Map([
   ["´", "\u0301"], ["ˊ", "\u0301"], ["`", "\u0300"], ["ˋ", "\u0300"],
   ["ˆ", "\u0302"], ["^", "\u0302"], ["¨", "\u0308"], ["˜", "\u0303"],
@@ -1954,9 +1979,24 @@ async function loadArticle() {
     $("#sourceLink").href = pdfUrl;
     $("#sourceLink").textContent = filename;
     $("#reprocessPdf").hidden = false;
+    let streamingTableOfContents = false;
+    let streamingContentsDestination = null;
     const extracted = await fetchPdf(pdfUrl, (page, pageCount) => {
       const rawPassages = pdfBlockPassages([page]);
-      state.passages.push(...rawPassages.map((passage) => ({ ...passage, sentences: passageSentences(passage) })));
+      if (startsPdfTableOfContents(rawPassages)) {
+        streamingTableOfContents = true;
+        const destinations = pdfTableOfContentsDestinations(rawPassages)
+          .filter((destination) => destination > page.page && destination <= page.page + 12);
+        streamingContentsDestination = destinations.length ? Math.min(...destinations) : null;
+      }
+      const reachedDestination = streamingContentsDestination && page.page >= streamingContentsDestination;
+      const suppressPage = streamingTableOfContents && !reachedDestination
+        && (startsPdfTableOfContents(rawPassages) || looksLikePdfTableOfContentsPage(rawPassages));
+      if (!suppressPage) {
+        streamingTableOfContents = false;
+        streamingContentsDestination = null;
+        state.passages.push(...rawPassages.map((passage) => ({ ...passage, sentences: passageSentences(passage) })));
+      }
       render({ title: "", hideTitle: true }, state.passages, pdfUrl);
       $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
       setStatus({ state: "loading", message: `Rendered page ${page.page} of ${pageCount}` });
