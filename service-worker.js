@@ -201,6 +201,27 @@ chrome.action.onClicked.addListener(async (tab) => {
           ? document.querySelector('[data-testid="twitterArticleRichTextView"]')
           : null;
         if (richText) {
+          try {
+            const defuddle = new globalThis.__LocalDefuddle(document.cloneNode(true), {
+              url: location.href,
+              includeReplies: "extractors",
+              removeImages: false,
+              useAsync: true,
+            });
+            const extracted = await defuddle.parseAsync();
+            if (extracted?.content?.trim()) {
+              return articleResult({
+                title: extracted.title || document.title || "X article",
+                byline: extracted.author || "",
+                siteName: extracted.site || "X",
+                publishedTime: extracted.published || document.querySelector("time[datetime]")?.getAttribute("datetime") || "",
+                content: extracted.content,
+                kind: `defuddle-${extracted.extractorType || "x-article"}`,
+              });
+            }
+          } catch (error) {
+            console.warn("Defuddle X article extraction failed; using the DOM fallback:", error);
+          }
           const content = richText.cloneNode(true);
           content.querySelectorAll('[data-testid="markdown-code-block"]').forEach((block) => {
             const sourceCode = block.querySelector("code");
@@ -237,7 +258,11 @@ chrome.action.onClicked.addListener(async (tab) => {
             strong.append(...span.childNodes);
             span.replaceWith(strong);
           });
-          content.querySelectorAll(".longform-unstyled, .public-DraftStyleDefault-block").forEach((block) => {
+          const xRichBlockSelector = ".longform-unstyled, .public-DraftStyleDefault-block";
+          [...content.querySelectorAll(xRichBlockSelector)].filter((block) => {
+            if (!block.matches("div, section")) return false;
+            return ![...block.querySelectorAll(xRichBlockSelector)].some((nested) => nested.matches("div, section"));
+          }).forEach((block) => {
             const paragraph = document.createElement("p");
             paragraph.append(...block.childNodes);
             block.replaceWith(paragraph);
