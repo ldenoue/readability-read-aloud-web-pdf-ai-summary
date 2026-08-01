@@ -698,13 +698,14 @@ function pdfBlockPassages(pages) {
         passages.push({ type: block.latex ? "formula" : "image", text: "", latex: block.latex || "", image: { src, alt: block.label || "PDF visual", width: block.width, height: block.height }, page: page.page, layout: block.layout });
         continue;
       }
-      const markedText = normalizePdfTypography(String(block.text || ""))
+      const markedText = repairWrappedPdfUrls(normalizePdfTypography(String(block.text || "")))
+        .replace(/-\uE107\s*\n\s*\uE106(?=\p{Ll})/gu, "")
         .replace(/-\n(?=\p{Ll})/gu, "")
         .replace(/\s*\n\s*/g, " ")
         .replace(/\s+([,.;:!?%)\]])/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
-      const { text, superscriptRanges, subscriptRanges, mathRanges } = extractPdfInlineStyles(markedText);
+      const { text, superscriptRanges, subscriptRanges, mathRanges, boldRanges } = extractPdfInlineStyles(markedText);
       if (!text) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
@@ -716,6 +717,7 @@ function pdfBlockPassages(pages) {
         superscriptRanges,
         subscriptRanges,
         mathRanges,
+        boldRanges,
         pdfText: true,
         headingLevel: isTitle ? 1 : isHeading ? 2 : null,
         isBold: Boolean(block.isBold),
@@ -748,11 +750,12 @@ function mergePdfColumnContinuations(passages) {
     const startsLowercase = sameTextFlow && /^(?:[“‘"']\s*)?\p{Ll}/u.test(passage.text);
     const startsCitationYear = sameTextFlow && /^(?:[\[(]\s*)?(?:19|20)\d{2}\b/u.test(passage.text)
       && /(?:\bet al\.,|[,\[(])\s*$/iu.test(previous?.text || "");
+    const wrappedUrl = sameTextFlow && isWrappedPdfUrlContinuation(previous?.text || "", passage.text);
     const startsMidSentence = startsLowercase || startsCitationYear;
     const previousWithoutTrailingCitations = previous?.text.replace(/(?:\s*\[[\d,;\s-]+\])+\s*$/u, "").trim() || "";
     const previousSentenceFinished = /[.!?…:;][”’"')\]]?$/u.test(previousWithoutTrailingCitations);
     const crossesPage = sameTextFlow && passage.page === previous.page + 1;
-    const sentenceContinues = startsMidSentence || !previousSentenceFinished;
+    const sentenceContinues = wrappedUrl || startsMidSentence || !previousSentenceFinished;
     const previousWidth = previous?.layout ? previous.layout.x2 - previous.layout.x1 : 0;
     const passageWidth = passage.layout ? passage.layout.x2 - passage.layout.x1 : 0;
     const horizontalOverlap = previous?.layout && passage.layout
@@ -766,13 +769,13 @@ function mergePdfColumnContinuations(passages) {
     const hyphenated = /-$/u.test(previous?.text || "") && /^\p{Ll}/u.test(passage.text);
     const samePageHyphen = !crossedVisuals && samePage && sameColumn && hyphenated;
     const uninterruptedContinuation = !crossedVisuals
-      && sentenceContinues && (jumpsToNextColumn || startsMidSentence && (nearbyInColumn || crossesPage));
+      && sentenceContinues && (jumpsToNextColumn || (startsMidSentence || wrappedUrl) && (nearbyInColumn || crossesPage));
     const interruptedPageHyphen = crossedVisuals && crossesPage && startsMidSentence && hyphenated;
     if (uninterruptedContinuation || interruptedPageHyphen || samePageHyphen) {
       const interruptedWord = previous.text.match(/([\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*)-$/u)?.[1] || "";
-      const keepCompoundHyphen = hyphenated && interruptedWord.includes("-");
+      const keepCompoundHyphen = hyphenated && (wrappedUrl || interruptedWord.includes("-"));
       const prefix = previous.text.replace(hyphenated && !keepCompoundHyphen ? /-$/u : /$/u, "");
-      const separator = hyphenated ? "" : " ";
+      const separator = hyphenated || wrappedUrl ? "" : " ";
       const rangeOffset = prefix.length + separator.length;
       previous.text = `${prefix}${separator}${passage.text}`;
       previous.superscriptRanges = [
@@ -787,12 +790,23 @@ function mergePdfColumnContinuations(passages) {
         ...(previous.mathRanges || []).filter((range) => range.end <= prefix.length),
         ...(passage.mathRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
       ];
+      previous.boldRanges = [
+        ...(previous.boldRanges || []).filter((range) => range.end <= prefix.length),
+        ...(passage.boldRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+      ];
       previous.layout = { ...previous.layout, x2: Math.max(previous.layout.x2, passage.layout.x2), y2: Math.max(previous.layout.y2, passage.layout.y2) };
       continue;
     }
     merged.push(passage);
   }
   return merged;
+}
+
+function isWrappedPdfUrlContinuation(previous, next) {
+  return /https?:$/iu.test(previous) && /^\/\/[\p{L}\p{N}]/u.test(next)
+    || /https?:\/\/$/iu.test(previous) && /^[\p{L}\p{N}]/u.test(next)
+    || /https?:\/\/\S+[/?#=&-]$/iu.test(previous) && /^[\p{L}\p{N}%._~-]/u.test(next)
+    || /https?:\/\/\S+\.$/iu.test(previous) && /^(?:com|org|net|edu|gov|io|ai|co|dev|app)\//iu.test(next);
 }
 
 function isPdfVisualInterruption(passage) {
@@ -808,6 +822,7 @@ function extractPdfInlineStyles(markedText) {
     { open: "\uE100", close: "\uE101", ranges: [], start: null },
     { open: "\uE102", close: "\uE103", ranges: [], start: null },
     { open: "\uE104", close: "\uE105", ranges: [], start: null },
+    { open: "\uE106", close: "\uE107", ranges: [], start: null },
   ];
   for (const character of markedText) {
     const opening = definitions.find((definition) => definition.open === character);
@@ -823,7 +838,7 @@ function extractPdfInlineStyles(markedText) {
   for (const definition of definitions) {
     if (definition.start !== null && text.length > definition.start) definition.ranges.push({ start: definition.start, end: text.length });
   }
-  return { text, superscriptRanges: definitions[0].ranges, subscriptRanges: definitions[1].ranges, mathRanges: definitions[2].ranges };
+  return { text, superscriptRanges: definitions[0].ranges, subscriptRanges: definitions[1].ranges, mathRanges: definitions[2].ranges, boldRanges: definitions[3].ranges };
 }
 
 function removeRepeatedPdfMarginals(passages) {
@@ -949,6 +964,13 @@ function normalizePdfTypography(value) {
   return text.normalize("NFC");
 }
 
+function repairWrappedPdfUrls(value) {
+  return value
+    .replace(/\b(https?):\s*\/\/\s*(?=[\p{L}\p{N}])/giu, "$1://")
+    .replace(/(https?:\/\/[^\s]+[/?#=&-])\s*\n\s*(?=[\p{L}\p{N}%._~-])/giu, "$1")
+    .replace(/(https?:\/\/[^\s]+\.)\s*\n\s*(?=(?:com|org|net|edu|gov|io|ai|co|dev|app)\/)/giu, "$1");
+}
+
 function escapeRegExp(value) {
   return value.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&");
 }
@@ -1070,12 +1092,21 @@ function chunks(text, limit = 340) {
 }
 
 function sentences(text) {
+  const punctuation = new Map([[".", "\uE200"], ["?", "\uE201"], ["!", "\uE202"]]);
+  const restore = (value) => value.replace(/[\uE200-\uE202]/gu, (character) => [".", "?", "!"][character.codePointAt(0) - 0xE200]);
+  const characters = text.split("");
+  for (const match of linkMatches(text)) {
+    for (let index = match.start; index < match.end; index++) {
+      if (punctuation.has(characters[index])) characters[index] = punctuation.get(characters[index]);
+    }
+  }
+  const segmentable = characters.join("");
   if (typeof Intl.Segmenter === "function") {
     const segmenter = new Intl.Segmenter(undefined, { granularity: "sentence" });
-    const result = [...segmenter.segment(text)].map(({ segment }) => segment.trim()).filter(Boolean);
+    const result = [...segmenter.segment(segmentable)].map(({ segment }) => restore(segment).trim()).filter(Boolean);
     if (result.length) return result;
   }
-  return text.match(/[^.!?]+(?:[.!?]+|$)/g)?.map((sentence) => sentence.trim()).filter(Boolean) || [text];
+  return segmentable.match(/[^.!?]+(?:[.!?]+|$)/g)?.map((sentence) => restore(sentence).trim()).filter(Boolean) || [text];
 }
 
 function appendPdfCitationText(container, text, references, isReferenceEntry) {
@@ -1239,10 +1270,10 @@ function appendPdfLinkedText(container, text, references, visuals, isReferenceEn
   appendPdfCitationText(container, text.slice(offset), references, isReferenceEntry);
 }
 
-function appendPdfStyledText(container, text, textStart, superscriptRanges, subscriptRanges, mathRanges, references, visuals, isReferenceEntry) {
+function appendPdfStyledText(container, text, textStart, superscriptRanges, subscriptRanges, mathRanges, boldRanges, references, visuals, isReferenceEntry) {
   const textEnd = textStart + text.length;
   const boundaries = new Set([0, text.length]);
-  for (const ranges of [superscriptRanges, subscriptRanges, mathRanges]) {
+  for (const ranges of [superscriptRanges, subscriptRanges, mathRanges, boldRanges]) {
     for (const range of ranges || []) {
       if (range.end <= textStart || range.start >= textEnd) continue;
       boundaries.add(Math.max(0, range.start - textStart));
@@ -1258,12 +1289,18 @@ function appendPdfStyledText(container, text, textStart, superscriptRanges, subs
     const isSuperscript = (superscriptRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
     const isSubscript = (subscriptRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
     const isMath = (mathRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
-    const target = isSuperscript ? document.createElement("sup") : isSubscript ? document.createElement("sub") : container;
-    const contentTarget = isMath ? document.createElement("var") : target;
-    if (isMath && target !== container) target.append(contentTarget);
-    appendPdfLinkedText(contentTarget, segment, references, visuals, isReferenceEntry);
-    if (isMath && target === container) container.append(contentTarget);
-    else if (target !== container) container.append(target);
+    const isBold = (boldRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
+    const tags = [isSuperscript ? "sup" : isSubscript ? "sub" : "", isBold ? "strong" : "", isMath ? "var" : ""].filter(Boolean);
+    let root = null;
+    let target = null;
+    for (const tag of tags) {
+      const element = document.createElement(tag);
+      if (target) target.append(element);
+      else root = element;
+      target = element;
+    }
+    appendPdfLinkedText(target || container, segment, references, visuals, isReferenceEntry);
+    if (root) container.append(root);
   }
 }
 
@@ -1435,7 +1472,7 @@ function render(metadata, passages, sourceUrl) {
       } else span.title = "Read from this sentence";
       const sentenceTextOffset = passage.pdfText ? passage.text.indexOf(sentence, passageTextOffset) : -1;
       if (passage.pdfText) {
-        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, passage.subscriptRanges, passage.mathRanges, references, visuals, Boolean(referenceNumber));
+        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, passage.subscriptRanges, passage.mathRanges, passage.boldRanges, references, visuals, Boolean(referenceNumber));
         passageTextOffset = Math.max(passageTextOffset, sentenceTextOffset + sentence.length);
       }
       else appendLinkedPassageText(span, sentence, passage.links);

@@ -140,7 +140,7 @@ function pdfTokens(content, viewport, fontLookup = () => null) {
       text: item.str,
       width,
       fontSize: fontHeight,
-      isBold: /(?:bold|black|heavy|semibold|demi)/i.test(fontDescription),
+      isBold: /(?:bold|black|heavy|semibold|demi|nimbusromno9l[-_](?:medi|medium)(?:ital)?)/i.test(fontDescription),
       isItalic: /(?:italic|oblique)/i.test(fontDescription),
       isMath: /(?:cambria\s*math|stix|mathjax|latinmodernmath|texgyre.*math|(?:^|[+\s_-])(?:cmmi|cmsy|cmex|msam|msbm|stmary|rsfs|eufm|symbol|mathematicalpi)\d*(?:$|[+\s_-]))/i.test(fontDescription),
       originX: tx[4], originY: tx[5], advanceUnitX, advanceUnitY,
@@ -349,6 +349,7 @@ function joinRowTokens(tokens) {
     const isSubscript = token.fontSize <= medianFontSize * 0.88
       && token.baselineY >= baseline + medianFontSize * 0.12;
     let tokenText = token.isMath ? `\uE104${token.text}\uE105` : token.text;
+    if (token.isBold) tokenText = `\uE106${tokenText}\uE107`;
     if (isSuperscript) tokenText = `\uE100${tokenText}\uE101`;
     else if (isSubscript) tokenText = `\uE102${tokenText}\uE103`;
     text += tokenText;
