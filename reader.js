@@ -656,7 +656,8 @@ function likelyPdfTitleBlock(pages, maxPages = 3) {
 
 function pdfTitleFromPages(pages) {
   const block = likelyPdfTitleBlock(pages);
-  return block ? normalizePdfTypography(String(block.text || ""))
+  const normalized = block ? normalizePdfTypography(String(block.text || "")) : "";
+  return normalized ? extractPdfInlineStyles(normalized).text
     .replace(/-\n(?=\p{Ll})/gu, "")
     .replace(/\s*\n\s*/g, " ")
     .replace(/\s+/g, " ")
