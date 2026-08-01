@@ -49,7 +49,51 @@ async function createIndex(includeVectors = false) {
   return index;
 }
 
-function render(savedDocuments, query = "") {
+function queryTerms(query) {
+  return [...new Set(query.normalize("NFKC").match(/[\p{L}\p{N}]+/gu) || [])]
+    .filter((term) => term.length >= 2)
+    .sort((left, right) => right.length - left.length);
+}
+
+function passageSnippet(savedDocument, hit, query) {
+  let text = String(hit?.document?.content || savedDocument.summary?.text || documentText(savedDocument)).replace(/\s+/g, " ").trim();
+  const title = titleOf(savedDocument).replace(/\s+/g, " ").trim();
+  if (title && text.startsWith(`${title} `)) text = text.slice(title.length + 1);
+  const lower = text.toLocaleLowerCase();
+  const positions = queryTerms(query).map((term) => lower.indexOf(term.toLocaleLowerCase())).filter((position) => position >= 0);
+  let start = positions.length ? Math.max(0, Math.min(...positions) - 110) : 0;
+  if (start > 0) start = text.indexOf(" ", start) + 1 || start;
+  let end = Math.min(text.length, start + 360);
+  if (end < text.length) end = text.lastIndexOf(" ", end) > start ? text.lastIndexOf(" ", end) : end;
+  return `${start ? "…" : ""}${text.slice(start, end).trim()}${end < text.length ? "…" : ""}`;
+}
+
+function appendHighlightedText(container, text, query) {
+  const terms = queryTerms(query).map((term) => term.replace(/[\\^$.*+?()[\]{}|\-]/g, "\\$&"));
+  if (!terms.length) { container.textContent = text; return; }
+  const pattern = new RegExp(`(${terms.join("|")})`, "giu");
+  let offset = 0;
+  for (const match of text.matchAll(pattern)) {
+    container.append(document.createTextNode(text.slice(offset, match.index)));
+    const mark = document.createElement("mark");
+    mark.textContent = match[0];
+    container.append(mark);
+    offset = match.index + match[0].length;
+  }
+  container.append(document.createTextNode(text.slice(offset)));
+}
+
+function matchReason(savedDocument, hit, query, semanticOnly) {
+  if (semanticOnly) return "Semantic passage";
+  const terms = queryTerms(query).map((term) => term.toLocaleLowerCase());
+  const includesTerm = (value) => terms.some((term) => String(value || "").toLocaleLowerCase().includes(term));
+  if (includesTerm(titleOf(savedDocument))) return "Title match";
+  if (includesTerm(savedDocument.sourceUrl)) return "Address match";
+  if (includesTerm(hit?.document?.content)) return "Passage match";
+  return "Related passage";
+}
+
+function render(savedDocuments, query = "", matches = new Map(), semanticOnly = new Set()) {
   const results = $("#results");
   results.replaceChildren();
   $("#resultsHeading").textContent = query ? "Search results" : "Recently viewed";
@@ -70,7 +114,17 @@ function render(savedDocuments, query = "") {
     meta.querySelector(".date").textContent = new Date(savedDocument.lastViewedAt || savedDocument.updatedAt).toLocaleDateString();
     const excerpt = document.createElement("p");
     excerpt.className = "excerpt";
-    excerpt.textContent = (savedDocument.summary?.text || documentText(savedDocument)).slice(0, 280);
+    const hit = matches.get(savedDocument.id);
+    if (query && hit) {
+      const reason = document.createElement("div");
+      reason.className = "match-reason";
+      reason.textContent = matchReason(savedDocument, hit, query, semanticOnly.has(savedDocument.id));
+      card.append(heading, meta, reason);
+      appendHighlightedText(excerpt, passageSnippet(savedDocument, hit, query), query);
+    } else {
+      excerpt.textContent = (savedDocument.summary?.text || documentText(savedDocument)).slice(0, 280);
+      card.append(heading, meta);
+    }
     const remove = document.createElement("button");
     remove.className = "delete";
     remove.type = "button";
@@ -87,7 +141,7 @@ function render(savedDocuments, query = "") {
       $("#clearLibrary").hidden = library.length === 0;
       void runSearch();
     });
-    card.append(heading, meta, excerpt, remove);
+    card.append(excerpt, remove);
     results.append(card);
   }
 }
@@ -108,10 +162,14 @@ async function ensureEmbeddings(savedDocument, run) {
 }
 
 function documentsFromHits(hits) {
-  const scores = new Map();
-  for (const hit of hits) scores.set(hit.document.documentId, Math.max(scores.get(hit.document.documentId) || 0, hit.score));
-  return library.filter((savedDocument) => scores.has(savedDocument.id))
-    .sort((left, right) => scores.get(right.id) - scores.get(left.id));
+  const bestHits = new Map();
+  for (const hit of hits) {
+    const previous = bestHits.get(hit.document.documentId);
+    if (!previous || hit.score > previous.score) bestHits.set(hit.document.documentId, hit);
+  }
+  const documents = library.filter((savedDocument) => bestHits.has(savedDocument.id))
+    .sort((left, right) => bestHits.get(right.id).score - bestHits.get(left.id).score);
+  return { documents, bestHits };
 }
 
 async function runSearch() {
@@ -132,8 +190,8 @@ async function runSearch() {
     tolerance: 1,
     limit: 100,
   });
-  const lexicalDocuments = documentsFromHits(textResults.hits);
-  render(lexicalDocuments, query);
+  const lexical = documentsFromHits(textResults.hits);
+  render(lexical.documents, query, lexical.bestHits);
   $("#status").textContent = `Searching ${library.length} local documents…`;
   try {
     const [queryVector] = await embedTexts([query]);
@@ -153,12 +211,17 @@ async function runSearch() {
       limit: 100,
     });
     if (run !== searchRun) return;
-    const ranked = documentsFromHits(hybridResults.hits);
-    render(ranked, query);
-    $("#status").textContent = `${ranked.length} result${ranked.length === 1 ? "" : "s"} · Orama hybrid search · local ONNX embeddings`;
+    const hybrid = documentsFromHits(hybridResults.hits);
+    const displayHits = new Map(hybrid.bestHits);
+    for (const [documentId, hit] of lexical.bestHits) {
+      if (displayHits.has(documentId)) displayHits.set(documentId, hit);
+    }
+    const semanticOnly = new Set(hybrid.documents.filter((savedDocument) => !lexical.bestHits.has(savedDocument.id)).map((savedDocument) => savedDocument.id));
+    render(hybrid.documents, query, displayHits, semanticOnly);
+    $("#status").textContent = `${hybrid.documents.length} result${hybrid.documents.length === 1 ? "" : "s"} · Orama hybrid search · local ONNX embeddings`;
   } catch (error) {
     if (run !== searchRun) return;
-    $("#status").textContent = `${lexicalDocuments.length} text result${lexicalDocuments.length === 1 ? "" : "s"} · semantic search unavailable`;
+    $("#status").textContent = `${lexical.documents.length} text result${lexical.documents.length === 1 ? "" : "s"} · semantic search unavailable`;
     console.warn("Semantic search unavailable:", error);
   }
 }

@@ -1110,18 +1110,68 @@ function sentences(text) {
   return segmentable.match(/[^.!?]+(?:[.!?]+|$)/g)?.map((sentence) => restore(sentence).trim()).filter(Boolean) || [text];
 }
 
-function appendPdfCitationText(container, text, references, isReferenceEntry) {
+function normalizeAuthorYearKey(surname, year) {
+  const author = normalizeReferenceName(surname);
+  return author && year ? `${author}:${String(year).toLocaleLowerCase()}` : "";
+}
+
+function normalizeReferenceName(value) {
+  return String(value || "").normalize("NFKD").replace(/\p{M}/gu, "").replace(/[^\p{L}\p{N}]+/gu, "").toLocaleLowerCase();
+}
+
+function bibliographyFirstAuthorMatches(text, normalizedSurname) {
+  const beforeYear = String(text || "").split(/\b(?:19|20)\d{2}[a-z]?\b/iu, 1)[0];
+  const firstAuthor = beforeYear.includes(",") ? beforeYear.slice(0, beforeYear.indexOf(",")) : beforeYear;
+  return normalizeReferenceName(firstAuthor).endsWith(normalizedSurname);
+}
+
+function authorYearCitationMatches(text) {
+  const source = String(text || "");
+  const pattern = /\b([\p{L}\p{M}][\p{L}\p{M}'’.-]{1,})(?:\s+et\s+al\.|\s*(?:&|and)\s+[\p{L}\p{M}][\p{L}\p{M}'’.-]{1,})?(?:\s*,\s*|\s*\(\s*)((?:19|20)\d{2}[a-z]?)/giu;
+  return [...source.matchAll(pattern)].map((match) => {
+    const includesOpeningParenthesis = match[0].includes("(");
+    const includesClosingParenthesis = includesOpeningParenthesis && source[match.index + match[0].length] === ")";
+    const end = match.index + match[0].length + Number(includesClosingParenthesis);
+    return {
+      start: match.index,
+      end,
+      text: source.slice(match.index, end),
+      surname: match[1],
+      year: match[2],
+      key: normalizeAuthorYearKey(match[1], match[2]),
+    };
+  });
+}
+
+function appendAuthorYearCitationText(container, text, referenceIndex) {
+  let offset = 0;
+  for (const match of authorYearCitationMatches(text)) {
+    const reference = referenceIndex.authorYears.get(match.key);
+    if (!reference) continue;
+    appendLinkifiedPdfText(container, text.slice(offset, match.start));
+    const link = document.createElement("a");
+    link.className = "pdf-citation";
+    link.href = `#${reference.id}`;
+    link.textContent = match.text;
+    link.title = `Jump to ${reference.label}`;
+    container.append(link);
+    offset = match.end;
+  }
+  appendLinkifiedPdfText(container, text.slice(offset));
+}
+
+function appendPdfCitationText(container, text, referenceIndex, isReferenceEntry) {
   if (isReferenceEntry) { appendLinkifiedPdfText(container, text); return; }
   const citationPattern = /\[(?:\d+\s*(?:[,;–-]\s*\d+\s*)*)\]/g;
   let offset = 0;
   for (const match of text.matchAll(citationPattern)) {
-    appendLinkifiedPdfText(container, text.slice(offset, match.index));
+    appendAuthorYearCitationText(container, text.slice(offset, match.index), referenceIndex);
     const marker = match[0];
     let markerOffset = 0;
     for (const numberMatch of marker.matchAll(/\d+/g)) {
       container.append(document.createTextNode(marker.slice(markerOffset, numberMatch.index)));
       const number = numberMatch[0];
-      if (references.has(number)) {
+      if (referenceIndex.numbers.has(number)) {
         const link = document.createElement("a");
         link.className = "pdf-citation";
         link.href = `#pdf-ref-${number}`;
@@ -1134,7 +1184,7 @@ function appendPdfCitationText(container, text, references, isReferenceEntry) {
     container.append(document.createTextNode(marker.slice(markerOffset)));
     offset = match.index + marker.length;
   }
-  appendLinkifiedPdfText(container, text.slice(offset));
+  appendAuthorYearCitationText(container, text.slice(offset), referenceIndex);
 }
 
 function appendLinkifiedPdfText(container, text) {
@@ -1251,11 +1301,11 @@ function figureCaptionDistance(image, caption) {
   return verticalGap + horizontalGap * 0.5 + captionBelowBonus;
 }
 
-function appendPdfLinkedText(container, text, references, visuals, isReferenceEntry) {
+function appendPdfLinkedText(container, text, referenceIndex, visuals, isReferenceEntry) {
   const pattern = /\b(Figure|Fig\.?|Table)\s+(\d+[A-Za-z]?)\b/giu;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
-    appendPdfCitationText(container, text.slice(offset, match.index), references, isReferenceEntry);
+    appendPdfCitationText(container, text.slice(offset, match.index), referenceIndex, isReferenceEntry);
     const kind = /^table$/iu.test(match[1]) ? "table" : "figure";
     const number = match[2].toLowerCase();
     if (visuals[`${kind}s`].has(number)) {
@@ -1268,10 +1318,10 @@ function appendPdfLinkedText(container, text, references, visuals, isReferenceEn
     } else container.append(document.createTextNode(match[0]));
     offset = match.index + match[0].length;
   }
-  appendPdfCitationText(container, text.slice(offset), references, isReferenceEntry);
+  appendPdfCitationText(container, text.slice(offset), referenceIndex, isReferenceEntry);
 }
 
-function appendPdfStyledText(container, text, textStart, superscriptRanges, subscriptRanges, mathRanges, boldRanges, references, visuals, isReferenceEntry) {
+function appendPdfStyledText(container, text, textStart, superscriptRanges, subscriptRanges, mathRanges, boldRanges, referenceIndex, visuals, isReferenceEntry) {
   const textEnd = textStart + text.length;
   const boundaries = new Set([0, text.length]);
   for (const ranges of [superscriptRanges, subscriptRanges, mathRanges, boldRanges]) {
@@ -1300,7 +1350,7 @@ function appendPdfStyledText(container, text, textStart, superscriptRanges, subs
       else root = element;
       target = element;
     }
-    appendPdfLinkedText(target || container, segment, references, visuals, isReferenceEntry);
+    appendPdfLinkedText(target || container, segment, referenceIndex, visuals, isReferenceEntry);
     if (root) container.append(root);
   }
 }
@@ -1322,10 +1372,10 @@ function showCitationPreview(citation) {
     media.hidden = !visual;
     description.textContent = target.dataset.previewCaption || "";
   } else {
-    const number = hash.slice("#pdf-ref-".length);
-    preview.querySelector("strong").textContent = `Reference ${number}`;
+    const label = target.dataset.referenceLabel || `Reference ${hash.slice("#pdf-ref-".length)}`;
+    preview.querySelector("strong").textContent = label;
     media.hidden = true;
-    description.textContent = target.textContent.trim();
+    description.textContent = target.dataset.referencePreview || target.textContent.trim();
   }
   description.hidden = !description.textContent;
   preview.hidden = false;
@@ -1375,7 +1425,48 @@ function associatePdfReferences(passages) {
     if (sequential) tailCandidates.forEach(({ passage, number }) => entries.set(passage, String(number)));
   }
 
-  return { entries, numbers: new Set(entries.values()) };
+  const bibliographyIndex = passages.findIndex((passage) => passage.pdfText && bibliographyHeading.test(passage.text));
+  const citedAuthorYears = new Map();
+  const bodyEnd = bibliographyIndex >= 0 ? bibliographyIndex : passages.length;
+  passages.slice(0, bodyEnd).forEach((passage) => {
+    if (!passage.pdfText) return;
+    for (const citation of authorYearCitationMatches(passage.text)) citedAuthorYears.set(citation.key, citation);
+  });
+  const authorYears = new Map();
+  const authorYearEntries = new Map();
+  if (bibliographyIndex >= 0) {
+    const bibliography = passages.slice(bibliographyIndex + 1).filter((passage) => passage.pdfText && passage.text);
+    for (const citation of citedAuthorYears.values()) {
+      const normalizedSurname = normalizeAuthorYearKey(citation.surname, citation.year).split(":")[0];
+      let matchedEntry = null;
+      let previewText = "";
+      for (let index = 0; index < bibliography.length && !matchedEntry; index++) {
+        if (!bibliographyFirstAuthorMatches(bibliography[index].text, normalizedSurname)) continue;
+        let combined = "";
+        // A long author list can end one column or page before its year and
+        // title. Search a small adjacent window, anchored on the block that
+        // contains the cited surname, without merging the bibliography at
+        // large.
+        for (let lookahead = 0; lookahead < 3 && index + lookahead < bibliography.length; lookahead++) {
+          combined = `${combined} ${bibliography[index + lookahead].text}`.trim();
+          const year = combined.match(/\b(?:19|20)\d{2}[a-z]?\b/iu)?.[0];
+          if (!year) continue;
+          if (year.toLocaleLowerCase() === citation.year.toLocaleLowerCase()) {
+            matchedEntry = bibliography[index];
+            previewText = combined;
+          }
+          break;
+        }
+      }
+      if (!matchedEntry) continue;
+      const id = `pdf-ref-${citation.key.replace(":", "-")}`;
+      const reference = { id, label: `Reference: ${citation.surname}, ${citation.year}`, passage: matchedEntry, previewText };
+      authorYears.set(citation.key, reference);
+      if (!authorYearEntries.has(matchedEntry)) authorYearEntries.set(matchedEntry, reference);
+    }
+  }
+
+  return { entries, numbers: new Set(entries.values()), authorYears, authorYearEntries };
 }
 
 function preserveImageAspectRatio(image, dimensions = {}) {
@@ -1404,7 +1495,6 @@ function render(metadata, passages, sourceUrl) {
   const details = [metadata.author, metadata.site, metadata.published?.slice(0, 10)].filter(Boolean);
   if (details.length) { const byline = document.createElement("p"); byline.className = "byline"; byline.textContent = details.join(" · "); article.append(byline); }
   const referenceIndex = associatePdfReferences(passages);
-  const references = referenceIndex.numbers;
   const visuals = associatePdfVisuals(passages);
   const chatGroups = new Map();
   article.classList.toggle("conversation-thread", passages.some((passage) => passage.chatRole));
@@ -1420,7 +1510,15 @@ function render(metadata, passages, sourceUrl) {
     }
     element.dataset.index = index;
     const referenceNumber = referenceIndex.entries.get(passage) || null;
-    if (referenceNumber) element.id = `pdf-ref-${referenceNumber}`;
+    const authorYearReference = referenceIndex.authorYearEntries.get(passage) || null;
+    if (referenceNumber) {
+      element.id = `pdf-ref-${referenceNumber}`;
+      element.dataset.referenceLabel = `Reference ${referenceNumber}`;
+    } else if (authorYearReference) {
+      element.id = authorYearReference.id;
+      element.dataset.referenceLabel = authorYearReference.label;
+      element.dataset.referencePreview = authorYearReference.previewText;
+    }
     if (passage.figureNumber) element.id = `pdf-figure-${passage.figureNumber}`;
     if (passage.tableNumber) element.id = `pdf-table-${passage.tableNumber}`;
     if (passage.visualCaption) element.dataset.previewCaption = passage.visualCaption;
@@ -1443,11 +1541,22 @@ function render(metadata, passages, sourceUrl) {
       element.append(table);
     } else if (passage.type === "formula") {
       element.classList.add("formula");
-      const math = document.createElement("div");
-      math.className = "math-render";
-      math.innerHTML = renderMath(passage.latex);
-      math.title = passage.latex;
-      element.append(math);
+      const renderedMath = renderMath(passage.latex);
+      if (renderedMath) {
+        const math = document.createElement("div");
+        math.className = "math-render";
+        math.innerHTML = renderedMath;
+        math.title = passage.latex;
+        element.append(math);
+      } else if (passage.image?.src) {
+        const image = document.createElement("img");
+        image.className = "formula-image-fallback";
+        image.src = passage.image.src;
+        image.alt = "Formula from the original PDF";
+        image.loading = "lazy";
+        preserveImageAspectRatio(image, passage.image);
+        element.append(image);
+      }
     } else if (passage.type === "image") {
       const image = document.createElement("img");
       image.src = passage.image.src;
@@ -1473,7 +1582,7 @@ function render(metadata, passages, sourceUrl) {
       } else span.title = "Read from this sentence";
       const sentenceTextOffset = passage.pdfText ? passage.text.indexOf(sentence, passageTextOffset) : -1;
       if (passage.pdfText) {
-        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, passage.subscriptRanges, passage.mathRanges, passage.boldRanges, references, visuals, Boolean(referenceNumber));
+        appendPdfStyledText(span, sentence, Math.max(0, sentenceTextOffset), passage.superscriptRanges, passage.subscriptRanges, passage.mathRanges, passage.boldRanges, referenceIndex, visuals, Boolean(referenceNumber || authorYearReference));
         passageTextOffset = Math.max(passageTextOffset, sentenceTextOffset + sentence.length);
       }
       else appendLinkedPassageText(span, sentence, passage.links);
