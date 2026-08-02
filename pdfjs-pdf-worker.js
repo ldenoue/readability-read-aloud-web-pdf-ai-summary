@@ -5,6 +5,7 @@ let xyCut;
 let MathFormulaRecognizer;
 let TableStructureRecognizer;
 let reconstructTable;
+const PDF_RENDER_SCALE = 2;
 
 self.postMessage({ type: "booting" });
 try {
@@ -43,9 +44,7 @@ self.onmessage = async ({ data }) => {
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
       const transfers = [];
       const page = await document.getPage(pageNumber);
-      const baseViewport = page.getViewport({ scale: 1 });
-      const scale = 1280 / Math.max(baseViewport.width, baseViewport.height);
-      const viewport = page.getViewport({ scale });
+      const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
       const width = Math.max(1, Math.round(viewport.width));
       const height = Math.max(1, Math.round(viewport.height));
       const canvas = new OffscreenCanvas(width, height);
@@ -72,7 +71,7 @@ self.onmessage = async ({ data }) => {
         const y = Math.max(0, Math.floor(visual.y1 - picturePadding));
         const cropWidth = Math.max(1, Math.min(width - x, Math.ceil(visual.x2 + picturePadding) - x));
         const cropHeight = Math.max(1, Math.min(height - y, Math.ceil(visual.y2 + picturePadding) - y));
-        const crop = new OffscreenCanvas(cropWidth, cropHeight);
+        let crop = new OffscreenCanvas(cropWidth, cropHeight);
         crop.getContext("2d").drawImage(canvas, x, y, cropWidth, cropHeight, 0, 0, cropWidth, cropHeight);
         let latex = "";
         let table = null;
@@ -96,8 +95,9 @@ self.onmessage = async ({ data }) => {
           }
           catch (error) { self.postMessage({ type: "table-warning", message: error instanceof Error ? error.message : String(error) }); }
         }
+        if (visual.label === "Picture") crop = trimWhiteCanvas(crop);
         const bytes = table ? null : new Uint8Array(await (await crop.convertToBlob({ type: "image/png" })).arrayBuffer());
-        blocks.push({ type: table ? "table" : "image", ...(bytes ? { bytes, mime: "image/png" } : {}), width: cropWidth, height: cropHeight, label: visual.label, latex, table, ...visual });
+        blocks.push({ type: table ? "table" : "image", ...(bytes ? { bytes, mime: "image/png" } : {}), width: crop.width, height: crop.height, label: visual.label, latex, table, ...visual });
         if (bytes) transfers.push(bytes.buffer);
       }
       blocks = xyCut(blocks).map((block) => {
@@ -119,8 +119,10 @@ self.onmessage = async ({ data }) => {
 };
 
 function pdfTokens(content, viewport, fontLookup = () => null) {
+  const unicodeOffsets = shiftedPdfFontUnicodeOffsets(content);
   return content.items.flatMap((item, itemIndex) => {
-    if (!item.str?.trim() || !item.transform) return [];
+    const itemText = decodeShiftedPdfText(item.str, unicodeOffsets.get(item.fontName) || 0);
+    if (!itemText?.trim() || !item.transform) return [];
     const style = content.styles?.[item.fontName];
     const tx = pdfjs.Util.transform(viewport.transform, item.transform);
     const fontHeight = Math.hypot(tx[2], tx[3]) || Math.abs(tx[3]) || item.height || 1;
@@ -137,7 +139,7 @@ function pdfTokens(content, viewport, fontLookup = () => null) {
       .filter(Boolean)
       .join(" ");
     const itemBox = {
-      text: item.str,
+      text: itemText,
       width,
       fontSize: fontHeight,
       isBold: /(?:bold|black|heavy|semibold|demi|nimbusromno9l[-_](?:medi|medium)(?:ital)?)/i.test(fontDescription),
@@ -151,6 +153,55 @@ function pdfTokens(content, viewport, fontLookup = () => null) {
     };
     return splitItemTokens(itemBox);
   });
+}
+
+function shiftedPdfFontUnicodeOffsets(content) {
+  const samples = new Map();
+  for (const item of content.items || []) {
+    if (!item.fontName || !item.str) continue;
+    samples.set(item.fontName, `${samples.get(item.fontName) || ""}${item.str}`);
+  }
+  const offsets = new Map();
+  for (const [fontName, sample] of samples) {
+    if (sample.length < 12) continue;
+    const controlCounts = new Map();
+    for (const character of sample) {
+      const code = character.codePointAt(0);
+      if (code > 0 && code < 32) controlCounts.set(code, (controlCounts.get(code) || 0) + 1);
+    }
+    if ([...controlCounts.values()].reduce((sum, count) => sum + count, 0) < 2) continue;
+    const candidates = [...controlCounts].sort((left, right) => right[1] - left[1]);
+    for (const [spaceCode] of candidates) {
+      const offset = 32 - spaceCode;
+      if (offset <= 0 || offset > 64) continue;
+      const decoded = decodeShiftedPdfText(sample, offset);
+      const characters = [...decoded];
+      const printable = characters.filter((character) => {
+        const code = character.codePointAt(0);
+        return code >= 32 && code <= 126;
+      }).length;
+      const letters = characters.filter((character) => /[A-Za-z]/u.test(character)).length;
+      const spaces = characters.filter((character) => character === " ").length;
+      if (printable / characters.length >= 0.97 && letters / characters.length >= 0.45 && spaces >= 2) {
+        offsets.set(fontName, offset);
+        break;
+      }
+    }
+  }
+  return offsets;
+}
+
+function decodeShiftedPdfText(text, offset) {
+  if (!offset || !text) return text || "";
+  let decoded = [...text].map((character) => {
+    // Some custom single-byte fonts expose their encoded opening-parenthesis
+    // glyph as a normalized space even though the rest of the font follows a
+    // constant Unicode offset.
+    if (offset === 29 && character === " ") return "(";
+    return String.fromCodePoint(character.codePointAt(0) + offset);
+  }).join("");
+  if (offset === 29 && decoded.lastIndexOf("(") > decoded.lastIndexOf(")") && /[\p{L}\p{N}]$/u.test(decoded)) decoded += ")";
+  return decoded;
 }
 
 function splitItemTokens(item) {
@@ -436,6 +487,35 @@ function fontAscent(style, fontHeight) {
   if (Number.isFinite(style?.ascent) && style.ascent * fontHeight > fontHeight * 0.15) return style.ascent * fontHeight;
   if (Number.isFinite(style?.descent) && (1 + style.descent) * fontHeight > fontHeight * 0.15) return (1 + style.descent) * fontHeight;
   return fontHeight;
+}
+
+function nonWhitePixelBounds(data, width, height, threshold = 250) {
+  let left = width;
+  let top = height;
+  let right = -1;
+  let bottom = -1;
+  for (let y = 0; y < height; y += 1) {
+    for (let x = 0; x < width; x += 1) {
+      const offset = (y * width + x) * 4;
+      if (data[offset] >= threshold && data[offset + 1] >= threshold && data[offset + 2] >= threshold) continue;
+      left = Math.min(left, x);
+      top = Math.min(top, y);
+      right = Math.max(right, x);
+      bottom = Math.max(bottom, y);
+    }
+  }
+  return right >= left && bottom >= top
+    ? { x: left, y: top, width: right - left + 1, height: bottom - top + 1 }
+    : null;
+}
+
+function trimWhiteCanvas(source) {
+  const context = source.getContext("2d", { willReadFrequently: true });
+  const bounds = nonWhitePixelBounds(context.getImageData(0, 0, source.width, source.height).data, source.width, source.height);
+  if (!bounds || (bounds.x === 0 && bounds.y === 0 && bounds.width === source.width && bounds.height === source.height)) return source;
+  const trimmed = new OffscreenCanvas(bounds.width, bounds.height);
+  trimmed.getContext("2d").drawImage(source, bounds.x, bounds.y, bounds.width, bounds.height, 0, 0, bounds.width, bounds.height);
+  return trimmed;
 }
 
 function containment(inner, outer) {

@@ -729,6 +729,7 @@ function pdfBlockPassages(pages) {
       const { text: extractedText, superscriptRanges, subscriptRanges, mathRanges, boldRanges } = extractPdfInlineStyles(markedText);
       let text = extractedText;
       if (!text) continue;
+      if (block.layoutLabel === "Text" && /^[,;]+$/u.test(text)) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
       const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
@@ -873,7 +874,13 @@ function extractPdfInlineStyles(markedText) {
   for (const definition of definitions) {
     if (definition.start !== null && text.length > definition.start) definition.ranges.push({ start: definition.start, end: text.length });
   }
-  return { text, superscriptRanges: definitions[0].ranges, subscriptRanges: definitions[1].ranges, mathRanges: definitions[2].ranges, boldRanges: definitions[3].ranges };
+  const boldRanges = definitions[3].ranges.reduce((merged, range) => {
+    const previous = merged.at(-1);
+    if (previous && /^\s*$/u.test(text.slice(previous.end, range.start))) previous.end = range.end;
+    else merged.push({ ...range });
+    return merged;
+  }, []);
+  return { text, superscriptRanges: definitions[0].ranges, subscriptRanges: definitions[1].ranges, mathRanges: definitions[2].ranges, boldRanges };
 }
 
 function removeRepeatedPdfMarginals(passages) {
@@ -1139,6 +1146,7 @@ function sentences(text) {
   const punctuation = new Map([[".", "\uE200"], ["?", "\uE201"], ["!", "\uE202"]]);
   const restore = (value) => value.replace(/[\uE200-\uE202]/gu, (character) => [".", "?", "!"][character.codePointAt(0) - 0xE200]);
   const characters = text.split("");
+  for (const match of text.matchAll(/\bFigs?\./giu)) characters[match.index + match[0].length - 1] = punctuation.get(".");
   for (const match of linkMatches(text)) {
     for (let index = match.start; index < match.end; index++) {
       if (punctuation.has(characters[index])) characters[index] = punctuation.get(characters[index]);
@@ -1475,9 +1483,10 @@ function hideCitationPreview(citation) {
 function associatePdfReferences(passages) {
   const entries = new Map();
   let inBibliography = false;
-  const bibliographyHeading = /^\s*(?:\d+(?:\.\d+)*[.)]?\s+)?(?:references(?:\s+and\s+notes)?|bibliography|works\s+cited)\s*:?[\s.]*$/iu;
+  const bibliographyHeading = /^\s*(?:\d+(?:\.\d+)*[.)]?\s+)?(?:references(?:\s+and\s+notes)?|bibliography|works\s+cited|endnotes|notes)\s*:?[\s.]*$/iu;
   const bracketedEntry = /^\s*\[(\d{1,3})\](?:\s|$)/u;
   const numberedEntry = /^\s*(\d{1,3})[.)](?:\s|$)/u;
+  const bareNumberedEntry = /^\s*(\d{1,3})\s+(?=[\p{Lu}\p{Lt}])/u;
 
   passages.forEach((passage) => {
     if (!passage.pdfText || !passage.text) return;
@@ -1486,13 +1495,15 @@ function associatePdfReferences(passages) {
       return;
     }
     const bracketed = passage.text.match(bracketedEntry)?.[1];
-    const numbered = inBibliography ? passage.text.match(numberedEntry)?.[1] : null;
+    const numbered = inBibliography
+      ? passage.text.match(numberedEntry)?.[1] || passage.text.match(bareNumberedEntry)?.[1]
+      : null;
     if (bracketed || numbered) entries.set(passage, bracketed || numbered);
   });
 
   if (![...entries.values()].some((number) => passages.findIndex((passage) => entries.get(passage) === number) >= passages.length * 0.6)) {
     const tailCandidates = passages.slice(Math.floor(passages.length * 0.6))
-      .map((passage) => ({ passage, number: passage.pdfText ? Number(passage.text.match(numberedEntry)?.[1]) : NaN }))
+      .map((passage) => ({ passage, number: passage.pdfText ? Number(passage.text.match(numberedEntry)?.[1] || passage.text.match(bareNumberedEntry)?.[1]) : NaN }))
       .filter(({ number }) => Number.isInteger(number));
     const sequential = tailCandidates.length >= 2
       && tailCandidates[0].number <= 3
