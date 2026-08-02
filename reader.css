@@ -72,12 +72,11 @@ button:disabled { cursor:not-allowed; opacity:.48; }
 article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.045em; margin:0 0 15px; }
 .byline { color:var(--muted); margin:0 0 42px; }
 .passage { margin:0 -15px 20px; padding:8px 15px; border-radius:9px; cursor:pointer; transition:.18s ease; }
-.passage:hover { background:var(--hover); }
 .passage.heading { font-size:22px; line-height:1.25; font-weight:800; margin-top:32px; }
 .passage.pdf-text { margin-bottom:8px; padding-top:3px; padding-bottom:3px; font-size:16px; line-height:1.55; }
 .youtube-transcript .passage.paragraph { margin-bottom:8px; padding-top:3px; padding-bottom:3px; }
 .passage.pdf-text.heading { margin-top:32px; margin-bottom:20px; font-size:22px; line-height:1.25; font-weight:800; }
-.passage.pdf-text.pdf-title { font-size:clamp(32px,5vw,48px); line-height:1.08; letter-spacing:-.035em; }
+.passage.pdf-text.pdf-title { font-size:clamp(32px,5vw,48px); line-height:1.24; letter-spacing:-.035em; }
 .passage.pdf-text.pdf-bold { font-weight:700; }
 .passage.pdf-text.pdf-italic { font-style:italic; }
 .passage.pdf-text sup { font-size:.72em; line-height:0; vertical-align:super; }

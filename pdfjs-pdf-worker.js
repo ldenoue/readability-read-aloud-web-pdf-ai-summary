@@ -214,12 +214,13 @@ function liftPdfTextRegions(tokens, regions, visuals) {
     const regionTokens = horizontal.filter((token) => !claimed.has(token) && regionAssignments.get(token) === region);
     if (!regionTokens.length) continue;
     regionTokens.forEach((token) => claimed.add(token));
-    const rows = tokenRows(regionTokens);
+    const dropCap = pdfDropCapToken(regionTokens, region);
+    const rows = tokenRows(dropCap ? regionTokens.filter((token) => token !== dropCap) : regionTokens);
     const characterCount = regionTokens.reduce((sum, token) => sum + token.text.length, 0);
     const boldCharacters = regionTokens.reduce((sum, token) => sum + (token.isBold ? token.text.length : 0), 0);
     const italicCharacters = regionTokens.reduce((sum, token) => sum + (token.isItalic ? token.text.length : 0), 0);
     blocks.push({
-      type: "text", text: rows.map(joinRowTokens).join("\n"),
+      type: "text", text: `${dropCap ? joinRowTokens([dropCap]) : ""}${rows.map(joinRowTokens).join("\n")}`,
       isHorizontal: true,
       fontSize: regionTokens.reduce((sum, token) => sum + token.fontSize * token.text.length, 0) / Math.max(1, characterCount),
       isBold: boldCharacters / Math.max(1, characterCount) >= 0.5,
@@ -239,6 +240,23 @@ function liftPdfTextRegions(tokens, regions, visuals) {
     });
   }
   return blocks;
+}
+
+function pdfDropCapToken(tokens, region) {
+  if (region?.label !== "Text" || tokens.length < 4) return null;
+  const ordered = tokens.slice().sort((left, right) => left.itemIndex - right.itemIndex || left.tokenIndex - right.tokenIndex);
+  const candidate = ordered[0];
+  if (candidate.isMath || !/^\p{L}$/u.test(candidate.text)) return null;
+  const remaining = tokens.filter((token) => token !== candidate);
+  const fontSizes = remaining.map((token) => token.fontSize).sort((left, right) => left - right);
+  const bodyFontSize = fontSizes[Math.floor(fontSizes.length / 2)] || 0;
+  if (!(bodyFontSize > 0) || candidate.fontSize < bodyFontSize * 2.5) return null;
+  const leftEdge = Math.min(...tokens.map((token) => token.x1));
+  if (candidate.x1 > leftEdge + bodyFontSize * 0.75) return null;
+  const nearbyLines = remaining.filter((token) => centerY(token) >= candidate.y1 && centerY(token) <= candidate.y2);
+  return new Set(nearbyLines.map((token) => Math.round(token.baselineY / Math.max(1, bodyFontSize * 0.5)))).size >= 2
+    ? candidate
+    : null;
 }
 
 function isProtectedInlineMathToken(token, tokens, regions) {

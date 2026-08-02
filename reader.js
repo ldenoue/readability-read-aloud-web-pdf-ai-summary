@@ -666,6 +666,24 @@ function pdfTitleFromPages(pages) {
     .trim() : "";
 }
 
+function canonicalPdfSmallCapsHeading(text) {
+  const words = String(text || "").match(/[\p{L}\p{M}]+/gu) || [];
+  const hasBrokenSmallCaps = words.some((word) => {
+    const uppercaseCount = (word.match(/\p{Lu}/gu) || []).length;
+    return uppercaseCount >= 3 && /\p{Ll}/u.test(word);
+  });
+  if (!hasBrokenSmallCaps) return text;
+
+  let wordIndex = 0;
+  return String(text).replace(/[\p{L}\p{M}]+/gu, (word) => {
+    const index = wordIndex++;
+    if (/^\p{Lu}{2,5}$/u.test(word)) return word;
+    const lower = word.toLocaleLowerCase();
+    if (index > 0 && /^(?:a|an|and|as|at|by|for|in|of|on|or|the|to|with)$/u.test(lower)) return lower;
+    return `${lower.charAt(0).toLocaleUpperCase()}${lower.slice(1)}`;
+  });
+}
+
 function pdfBlockPassages(pages) {
   const sizedBlocks = pages.flatMap((page) => page.blocks || [])
     .filter((block) => block.type === "text" && block.fontSize > 0)
@@ -708,12 +726,14 @@ function pdfBlockPassages(pages) {
         .replace(/\s+([,.;:!?%)\]])/g, "$1")
         .replace(/\s+/g, " ")
         .trim();
-      const { text, superscriptRanges, subscriptRanges, mathRanges, boldRanges } = extractPdfInlineStyles(markedText);
+      const { text: extractedText, superscriptRanges, subscriptRanges, mathRanges, boldRanges } = extractPdfInlineStyles(markedText);
+      let text = extractedText;
       if (!text) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
       const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
         || (block.layoutLabel === "Text" && fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
+      if (isHeading) text = canonicalPdfSmallCapsHeading(text);
       passages.push({
         type: isHeading ? "heading" : "paragraph",
         text,
@@ -773,29 +793,40 @@ function mergePdfColumnContinuations(passages) {
     const samePageHyphen = !crossedVisuals && samePage && sameColumn && hyphenated;
     const uninterruptedContinuation = !crossedVisuals
       && sentenceContinues && (jumpsToNextColumn || (startsMidSentence || wrappedUrl) && (nearbyInColumn || crossesPage));
-    const interruptedPageHyphen = crossedVisuals && crossesPage && startsMidSentence && hyphenated;
-    if (uninterruptedContinuation || interruptedPageHyphen || samePageHyphen) {
+    const interruptedPageContinuation = crossedVisuals && crossesPage && startsMidSentence
+      && (hyphenated || !previousSentenceFinished);
+    if (uninterruptedContinuation || interruptedPageContinuation || samePageHyphen) {
       const interruptedWord = previous.text.match(/([\p{L}\p{N}]+(?:-[\p{L}\p{N}]+)*)-$/u)?.[1] || "";
       const keepCompoundHyphen = hyphenated && (wrappedUrl || interruptedWord.includes("-"));
       const prefix = previous.text.replace(hyphenated && !keepCompoundHyphen ? /-$/u : /$/u, "");
       const separator = hyphenated || wrappedUrl ? "" : " ";
       const rangeOffset = prefix.length + separator.length;
-      previous.text = `${prefix}${separator}${passage.text}`;
+      const removedContinuationWhitespace = wrappedUrl
+        ? (passage.text.match(/^\/(\s+)(?=[\p{L}\p{N}%._~-])/u)?.[1].length || 0)
+        : 0;
+      const continuationText = wrappedUrl
+        ? passage.text.replace(/^\/\s+(?=[\p{L}\p{N}%._~-])/u, "/")
+        : passage.text;
+      const shiftedContinuationRange = (range) => {
+        const shift = (index) => rangeOffset + (index <= 1 ? index : Math.max(1, index - removedContinuationWhitespace));
+        return { start: shift(range.start), end: shift(range.end) };
+      };
+      previous.text = `${prefix}${separator}${continuationText}`;
       previous.superscriptRanges = [
         ...(previous.superscriptRanges || []).filter((range) => range.end <= prefix.length),
-        ...(passage.superscriptRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+        ...(passage.superscriptRanges || []).map(shiftedContinuationRange),
       ];
       previous.subscriptRanges = [
         ...(previous.subscriptRanges || []).filter((range) => range.end <= prefix.length),
-        ...(passage.subscriptRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+        ...(passage.subscriptRanges || []).map(shiftedContinuationRange),
       ];
       previous.mathRanges = [
         ...(previous.mathRanges || []).filter((range) => range.end <= prefix.length),
-        ...(passage.mathRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+        ...(passage.mathRanges || []).map(shiftedContinuationRange),
       ];
       previous.boldRanges = [
         ...(previous.boldRanges || []).filter((range) => range.end <= prefix.length),
-        ...(passage.boldRanges || []).map((range) => ({ start: range.start + rangeOffset, end: range.end + rangeOffset })),
+        ...(passage.boldRanges || []).map(shiftedContinuationRange),
       ];
       previous.layout = { ...previous.layout, x2: Math.max(previous.layout.x2, passage.layout.x2), y2: Math.max(previous.layout.y2, passage.layout.y2) };
       continue;
@@ -808,8 +839,9 @@ function mergePdfColumnContinuations(passages) {
 function isWrappedPdfUrlContinuation(previous, next) {
   return /https?:$/iu.test(previous) && /^\/\/[\p{L}\p{N}]/u.test(next)
     || /https?:\/\/$/iu.test(previous) && /^[\p{L}\p{N}]/u.test(next)
-    || /https?:\/\/\S+[/?#=&-]$/iu.test(previous) && /^[\p{L}\p{N}%._~-]/u.test(next)
-    || /https?:\/\/\S+\.$/iu.test(previous) && /^(?:com|org|net|edu|gov|io|ai|co|dev|app)\//iu.test(next);
+    || /(?:https?:\/\/|www\.)\S+[/?#=&-]$/iu.test(previous) && /^[\p{L}\p{N}%._~-]/u.test(next)
+    || /(?:https?:\/\/|www\.)\S+\.[A-Za-z]{2,}$/iu.test(previous) && /^\/\s*[\p{L}\p{N}%._~-]/u.test(next)
+    || /(?:https?:\/\/|www\.)\S+\.$/iu.test(previous) && /^(?:com|org|net|edu|gov|io|ai|co|dev|app)(?:\b|[/#?])/iu.test(next);
 }
 
 function isPdfVisualInterruption(passage) {
@@ -857,7 +889,13 @@ function removeRepeatedPdfMarginals(passages) {
   const marginalKey = (passage) => {
     const position = marginalPosition(passage);
     if (!position) return "";
-    const text = passage.text.normalize("NFKC").replace(/\s+/g, " ").trim().toLocaleLowerCase();
+    const text = passage.text.normalize("NFKC")
+      .replace(/\s+/g, " ")
+      .trim()
+      .replace(/^(?:\d{1,4}|[ivxlcdm]{1,8})\s+/iu, "")
+      .replace(/\s+(?:\d{1,4}|[ivxlcdm]{1,8})$/iu, "")
+      .trim()
+      .toLocaleLowerCase();
     return text.length >= 4 && text.length <= 240 ? `${position}:${text}` : "";
   };
   for (const passage of passages) {
@@ -970,8 +1008,11 @@ function normalizePdfTypography(value) {
 function repairWrappedPdfUrls(value) {
   return value
     .replace(/\b(https?):\s*\/\/\s*(?=[\p{L}\p{N}])/giu, "$1://")
+    .replace(/((?:https?:\/\/|www\.)[^\s]+\/)\s+\/\s*(?=[\p{L}\p{N}%._~-])/giu, "$1")
+    .replace(/((?:https?:\/\/|www\.)[^\s/]+)\s+\/\s*(?=[\p{L}\p{N}%._~-])/giu, "$1/")
+    .replace(/((?:https?:\/\/|www\.)[^\s]+\/)\s+(?=[\p{L}\p{N}%._~-])/giu, "$1")
     .replace(/(https?:\/\/[^\s]+[/?#=&-])\s*\n\s*(?=[\p{L}\p{N}%._~-])/giu, "$1")
-    .replace(/(https?:\/\/[^\s]+\.)\s*\n\s*(?=(?:com|org|net|edu|gov|io|ai|co|dev|app)\/)/giu, "$1");
+    .replace(/(https?:\/\/[^\s]+\.)\s+(?=(?:com|org|net|edu|gov|io|ai|co|dev|app)(?:\b|[/#?]))/giu, "$1");
 }
 
 function escapeRegExp(value) {
@@ -1304,23 +1345,53 @@ function figureCaptionDistance(image, caption) {
 }
 
 function appendPdfLinkedText(container, text, referenceIndex, visuals, isReferenceEntry) {
-  const pattern = /\b(Figure|Fig\.?|Table)\s+(\d+[A-Za-z]?)\b/giu;
+  const pattern = /\b(Figure|Fig\.?|Table)\s+(\d+)([A-Za-z])?(?:\s*(?:,\s*(?:(?:and|&)\s+)?|(?:and|&)\s+)(?:\d+)?[A-Za-z]\b)*/giu;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
     appendPdfCitationText(container, text.slice(offset, match.index), referenceIndex, isReferenceEntry);
     const kind = /^table$/iu.test(match[1]) ? "table" : "figure";
-    const number = match[2].toLowerCase();
-    if (visuals[`${kind}s`].has(number)) {
+    const parentNumber = match[2].toLowerCase();
+    const citedNumber = `${parentNumber}${match[3] || ""}`.toLowerCase();
+    const number = visuals[`${kind}s`].has(citedNumber)
+      ? citedNumber
+      : visuals[`${kind}s`].has(parentNumber) ? parentNumber : "";
+    if (number) {
       const link = document.createElement("a");
       link.className = `pdf-citation pdf-visual-link pdf-${kind}-link`;
       link.href = `#pdf-${kind}-${number}`;
       link.textContent = match[0];
-      link.title = `Jump to ${kind} ${match[2]}`;
+      link.title = `Jump to ${kind} ${number}`;
       container.append(link);
     } else container.append(document.createTextNode(match[0]));
     offset = match.index + match[0].length;
   }
   appendPdfCitationText(container, text.slice(offset), referenceIndex, isReferenceEntry);
+}
+
+function isPdfSuperscriptCitation(text, referenceIndex, isReferenceEntry) {
+  return !isReferenceEntry
+    && /^\s*\d{1,3}(?:\s*[,;–-]\s*\d{1,3})*\s*$/u.test(text)
+    && [...text.matchAll(/\d{1,3}/gu)].some((match) => referenceIndex.numbers.has(match[0]));
+}
+
+function appendPdfSuperscriptCitationText(container, text, referenceIndex) {
+  container.append(document.createTextNode("["));
+  let offset = 0;
+  for (const match of text.matchAll(/\d{1,3}/gu)) {
+    container.append(document.createTextNode(text.slice(offset, match.index)));
+    const number = match[0];
+    if (referenceIndex.numbers.has(number)) {
+      const link = document.createElement("a");
+      link.className = "pdf-citation";
+      link.href = `#pdf-ref-${number}`;
+      link.textContent = number;
+      link.title = `Jump to reference ${number}`;
+      container.append(link);
+    } else container.append(document.createTextNode(number));
+    offset = match.index + number.length;
+  }
+  container.append(document.createTextNode(text.slice(offset)));
+  container.append(document.createTextNode("]"));
 }
 
 function appendPdfStyledText(container, text, textStart, superscriptRanges, subscriptRanges, mathRanges, boldRanges, referenceIndex, visuals, isReferenceEntry) {
@@ -1343,7 +1414,8 @@ function appendPdfStyledText(container, text, textStart, superscriptRanges, subs
     const isSubscript = (subscriptRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
     const isMath = (mathRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
     const isBold = (boldRanges || []).some((range) => range.start <= textStart + start && range.end >= textStart + end);
-    const tags = [isSuperscript ? "sup" : isSubscript ? "sub" : "", isBold ? "strong" : "", isMath ? "var" : ""].filter(Boolean);
+    const isSuperscriptCitation = isSuperscript && !isMath && isPdfSuperscriptCitation(segment, referenceIndex, isReferenceEntry);
+    const tags = [isSuperscript && !isSuperscriptCitation ? "sup" : isSubscript ? "sub" : "", isBold ? "strong" : "", isMath ? "var" : ""].filter(Boolean);
     let root = null;
     let target = null;
     for (const tag of tags) {
@@ -1352,7 +1424,8 @@ function appendPdfStyledText(container, text, textStart, superscriptRanges, subs
       else root = element;
       target = element;
     }
-    appendPdfLinkedText(target || container, segment, referenceIndex, visuals, isReferenceEntry);
+    if (isSuperscriptCitation) appendPdfSuperscriptCitationText(target || container, segment, referenceIndex);
+    else appendPdfLinkedText(target || container, segment, referenceIndex, visuals, isReferenceEntry);
     if (root) container.append(root);
   }
 }
