@@ -1,7 +1,7 @@
 {
   "manifest_version": 3,
   "name": "Readability Read Aloud",
-  "version": "0.28.0",
+  "version": "0.28.1",
   "description": "Read articles, PDFs, chats, X articles, and YouTube transcripts with private local AI summaries and speech.",
   "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "tabs", "declarativeNetRequestWithHostAccess"],
   "host_permissions": ["http://*/*", "https://*/*", "file:///*"],

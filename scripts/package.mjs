@@ -29,6 +29,7 @@ const packageFiles = [
   "katex.css",
   "library.css",
   "library.html",
+  "markdown-export.js",
   "pdfjs-pdf-worker.js",
   "pocket-tts-worker.js",
   "pocket-tts.js",

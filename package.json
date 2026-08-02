@@ -1,7 +1,7 @@
 {
   "name": "readability-read-aloud-extension",
   "private": true,
-  "version": "0.28.0",
+  "version": "0.28.1",
   "type": "module",
   "scripts": {
     "build": "node scripts/build.mjs",

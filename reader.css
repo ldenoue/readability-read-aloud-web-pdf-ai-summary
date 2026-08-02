@@ -44,6 +44,8 @@ select { min-width:0; width:100%; height:42px; color:var(--ink); border:1px soli
 #pdfFields { display:grid; gap:12px; padding:14px; border:1px solid var(--line); border-radius:11px; background:var(--panel); }
 .secondary-button { min-height:38px; border:1px solid var(--line); border-radius:9px; color:var(--ink); background:var(--surface); font-size:12px; font-weight:750; }
 .export-button { color:var(--blue); }
+.export-actions { display:grid; grid-template-columns:1fr 1fr; gap:8px; }
+.export-actions .export-pdf { grid-column:1 / -1; }
 .transport { display:grid; grid-template-columns:1fr auto; gap:8px; }
 .transport button { height:43px; border:1px solid var(--line); border-radius:9px; color:var(--ink); background:var(--surface); padding:0 14px; font-weight:750; }
 .transport .primary { color:white; background:var(--green); border-color:var(--green); display:flex; align-items:center; justify-content:center; gap:8px; }

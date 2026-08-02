@@ -302,10 +302,16 @@ function tokenRows(tokens) {
   }
   if (primary.length) {
     for (const token of auxiliary) {
+      const mathAuxiliary = token.isMath || /[√∛∜∫∮∑∏]/u.test(token.text);
+      const baselineAllowance = mathAuxiliary ? 1.05 : 0.55;
       const candidates = rows.filter((candidate) => Math.abs(token.baselineY - candidate.medianBaseline)
-        <= Math.max(token.fontSize, candidate.medianFontSize) * 1.05);
-      const row = (candidates.length ? candidates : rows)
-        .slice().sort((left, right) => auxiliaryRowAffinity(token, left) - auxiliaryRowAffinity(token, right))[0];
+        <= Math.max(token.fontSize, candidate.medianFontSize) * baselineAllowance);
+      // Math fonts can report baselines far outside their visible glyphs, so
+      // retain the content-order fallback used for radicals and operators.
+      // Ordinary small text must remain close to a primary baseline; otherwise
+      // it is a separate line such as an affiliation beneath an author name.
+      const eligibleRows = candidates.length ? candidates : mathAuxiliary ? rows : [];
+      const row = eligibleRows.slice().sort((left, right) => auxiliaryRowAffinity(token, left) - auxiliaryRowAffinity(token, right))[0];
       if (row) { row.tokens.push(token); updateRow(row); }
       else { const created = { tokens: [token] }; updateRow(created); rows.push(created); }
     }

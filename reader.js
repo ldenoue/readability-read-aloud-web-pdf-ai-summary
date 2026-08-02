@@ -4,6 +4,7 @@ import { marked } from "./dist/marked.esm.js";
 import { renderMath } from "./dist/katex-render.js";
 import { linkMatches } from "./dist/linkify.js";
 import { renderArticlePdf } from "./dist/pdf-export.js";
+import { articleToMarkdown } from "./markdown-export.js";
 import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
 import { embedTexts } from "./embedding-client.js";
 import { clearGemmaSummarizer, measureGemmaTokens, summarizeWithGemma } from "./summary-client.js";
@@ -76,6 +77,7 @@ async function serializablePassages(passages) {
     const saved = structuredClone(passage);
     if (saved.image?.src && (!saved.image.src.startsWith("data:") || !(saved.image.width > 0 && saved.image.height > 0))) {
       try {
+        if (/^https?:/iu.test(saved.image.src)) saved.image.originalSrc ||= saved.image.src;
         const asset = await localImageAsset(saved.image.src);
         saved.image.src = asset.src;
         saved.image.width ||= asset.width;
@@ -1614,6 +1616,73 @@ function safePdfFilename(value) {
   return `${name || "article"}.pdf`;
 }
 
+function safeMarkdownFilename(value) {
+  return safePdfFilename(value).replace(/\.pdf$/u, ".md");
+}
+
+function currentArticleMarkdown() {
+  const summary = $("#summaryText");
+  return articleToMarkdown({
+    metadata: activeMetadata,
+    sourceUrl: activeSourceUrl,
+    summary: summary.hidden ? "" : summary.textContent,
+    passages: state.passages,
+    formulaIsValid: (latex) => Boolean(renderMath(latex)),
+  });
+}
+
+function downloadCurrentArticleMarkdown() {
+  const title = activeMetadata.title || $("#article h1")?.textContent || "Article";
+  const blob = new Blob([currentArticleMarkdown()], { type: "text/markdown;charset=utf-8" });
+  const url = URL.createObjectURL(blob);
+  const download = document.createElement("a");
+  download.href = url;
+  download.download = safeMarkdownFilename(title);
+  document.body.append(download);
+  download.click();
+  download.remove();
+  setTimeout(() => URL.revokeObjectURL(url), 30000);
+  setStatus({ state: "ready", message: "Markdown exported locally" });
+}
+
+async function writeClipboardText(text) {
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const textarea = document.createElement("textarea");
+    textarea.value = text;
+    textarea.style.position = "fixed";
+    textarea.style.opacity = "0";
+    document.body.append(textarea);
+    textarea.select();
+    const copied = document.execCommand("copy");
+    textarea.remove();
+    if (!copied) throw new Error("Clipboard access was denied.");
+  }
+}
+
+async function copyCurrentArticleMarkdown() {
+  const button = $("#copyMarkdown");
+  const previousLabel = button.textContent;
+  button.disabled = true;
+  try {
+    await writeClipboardText(currentArticleMarkdown());
+    button.textContent = "Copied";
+    setStatus({ state: "ready", message: "Article copied as Markdown" });
+  } catch (error) {
+    setStatus({ state: "error", message: `Could not copy Markdown: ${error.message}` });
+  } finally {
+    setTimeout(() => {
+      button.textContent = previousLabel;
+      button.disabled = !documentReady;
+    }, 1200);
+  }
+}
+
+function enableExportButtons() {
+  for (const selector of ["#exportPdf", "#exportMarkdown", "#copyMarkdown"]) $(selector).disabled = false;
+}
+
 function unwrapExportSentences(container) {
   container.querySelectorAll(".sentence").forEach((sentence) => {
     sentence.replaceWith(...sentence.childNodes);
@@ -2109,7 +2178,7 @@ async function loadArticle() {
     render(saved.metadata || {}, state.passages, saved.sourceUrl);
     $("#play").disabled = !state.passages.some((passage) => passage.sentences.length);
     documentReady = true;
-    $("#exportPdf").disabled = false;
+    enableExportButtons();
     if (!restoreSavedSummary(saved.summary)) updateSummaryControls();
     void indexSavedDocument(saved);
     setStatus({ state: "ready", message: `Restored locally · ${state.passages.length} passages ready` });
@@ -2166,7 +2235,7 @@ async function loadArticle() {
     render(metadata, state.passages, pdfUrl);
     $("#play").disabled = false;
     documentReady = true;
-    $("#exportPdf").disabled = false;
+    enableExportButtons();
     await persistDocument({ kind: "pdf", sourceUrl: pdfUrl, metadata, passages: state.passages, language: state.language, pageCount: extracted.pageCount, summary: null, embeddingChunks: null });
     updateSummaryControls();
     setStatus({ state: "ready", message: `${extracted.pageCount} PDF pages · saved locally` });
@@ -2198,7 +2267,7 @@ async function loadArticle() {
   render(metadata, state.passages, sourceUrl);
   $("#play").disabled = false;
   documentReady = true;
-  $("#exportPdf").disabled = false;
+  enableExportButtons();
   await persistDocument({ kind: article.kind === "youtube" ? "youtube" : "article", sourceUrl, metadata, passages: state.passages, language: state.language, summary: null, videoId: article.videoId, duration: article.duration, chapters: article.chapters });
   updateSummaryControls();
   setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
@@ -2207,6 +2276,8 @@ async function loadArticle() {
 $("#play").addEventListener("click", readArticle);
 $("#stop").addEventListener("click", stopReading);
 $("#exportPdf").addEventListener("click", () => { void exportCurrentArticle(); });
+$("#exportMarkdown").addEventListener("click", downloadCurrentArticleMarkdown);
+$("#copyMarkdown").addEventListener("click", () => { void copyCurrentArticleMarkdown(); });
 $("#reprocessPdf").addEventListener("click", () => {
   const sourceUrl = $("#sourceLink").href;
   if (!sourceUrl) return;
