@@ -92,6 +92,24 @@ self.onmessage = async ({ data }) => {
         ];
       }
       let blocks = liftPdfTextRegions(tokens, textRegions, visuals);
+      const pdfListings = pdfListingsFromTokens(tokens);
+      if (pdfListings.length) {
+        const listingBounds = pdfListings.map((listing) => listing.bounds);
+        blocks = blocks.filter((block) => block.type !== "text" || !listingBounds.some((bounds) => {
+          const x = (block.x1 + block.x2) / 2;
+          const y = (block.y1 + block.y2) / 2;
+          return x >= bounds.x1 && x <= bounds.x2 && y >= bounds.y1 && y <= bounds.y2;
+        }));
+        for (const listing of pdfListings) {
+          blocks.push({
+            type: "text", text: listing.captionText, layoutLabel: "Listing-caption", listingNumber: listing.number,
+            fontSize: listing.captionFontSize, isHorizontal: true, ...listing.captionBounds,
+          }, {
+            type: "text", text: listing.contentText, layoutLabel: "Listing-content", listingNumber: listing.number,
+            fontSize: listing.contentFontSize, isHorizontal: true, ...listing.contentBounds,
+          });
+        }
+      }
 
       for (const visual of visuals) {
         const picturePadding = visual.label === "Picture" ? Math.min(16, Math.max(6, Math.round(Math.min(width, height) * 0.008))) : 0;
@@ -232,6 +250,61 @@ function pdfFrontMatterIndexPage(tokens, activeKind = "", pageNumber = 1, pageCo
     || leaderEntries.length >= 2
     || numberedEntries.length >= 1 && destinationNumbers.length >= 2;
   return { isIndex, kind: "" };
+}
+
+function pdfListingsFromTokens(tokens) {
+  const rows = tokenRows(tokens.filter((token) => token.isHorizontal)).map((tokensInRow) => {
+    const text = joinRowTokens(tokensInRow).replace(/[\uE100-\uE107]/gu, "").trim();
+    const fontSizes = tokensInRow.map((token) => token.fontSize).sort((left, right) => left - right);
+    return {
+      tokens: tokensInRow,
+      text,
+      fontSize: fontSizes[Math.floor(fontSizes.length / 2)] || 1,
+      x1: Math.min(...tokensInRow.map((token) => token.x1)), y1: Math.min(...tokensInRow.map((token) => token.y1)),
+      x2: Math.max(...tokensInRow.map((token) => token.x2)), y2: Math.max(...tokensInRow.map((token) => token.y2)),
+    };
+  }).sort((left, right) => left.y1 - right.y1 || left.x1 - right.x1);
+  const listings = [];
+  const seenNumbers = new Set();
+  for (let index = 0; index < rows.length; index += 1) {
+    const caption = rows[index];
+    const match = caption.text.match(/^\s*(?:Code\s+)?Listing\s+(\d+(?:\.\d+)*)\b/iu);
+    if (!match || seenNumbers.has(match[1].toLowerCase())) continue;
+    const contentRows = [];
+    let previous = caption;
+    for (let nextIndex = index + 1; nextIndex < rows.length && contentRows.length < 80; nextIndex += 1) {
+      const row = rows[nextIndex];
+      if (/^\s*(?:Code\s+)?Listing\s+\d/iu.test(row.text)) break;
+      const gap = row.y1 - previous.y2;
+      const lineHeight = Math.max(previous.fontSize, row.fontSize, 1);
+      const headingLike = /^\p{Lu}[\p{L}\p{N} '&/-]{0,45}$/u.test(row.text) && !/[#=|,()[\]]/u.test(row.text);
+      if (contentRows.length && headingLike && gap > lineHeight * 0.75) break;
+      if (gap > lineHeight * (contentRows.length ? 2.25 : 3.2)) break;
+      if (contentRows.length >= 3 && gap > lineHeight * 1.5 && /[.!?]\s*$/u.test(row.text)) break;
+      contentRows.push(row);
+      previous = row;
+    }
+    if (!contentRows.length) continue;
+    seenNumbers.add(match[1].toLowerCase());
+    const contentBounds = {
+      x1: Math.min(...contentRows.map((row) => row.x1)), y1: Math.min(...contentRows.map((row) => row.y1)),
+      x2: Math.max(...contentRows.map((row) => row.x2)), y2: Math.max(...contentRows.map((row) => row.y2)),
+    };
+    listings.push({
+      number: match[1].toLowerCase(), captionText: caption.text,
+      contentText: contentRows.map((row) => row.text).join("\n"),
+      captionFontSize: caption.fontSize,
+      contentFontSize: contentRows.map((row) => row.fontSize).sort((left, right) => left - right)[Math.floor(contentRows.length / 2)] || 1,
+      captionBounds: { x1: caption.x1, y1: caption.y1, x2: caption.x2, y2: caption.y2 },
+      contentBounds,
+      bounds: {
+        x1: Math.min(caption.x1, contentBounds.x1), y1: caption.y1,
+        x2: Math.max(caption.x2, contentBounds.x2), y2: contentBounds.y2,
+      },
+    });
+    index += contentRows.length;
+  }
+  return listings;
 }
 
 function hasObliqueTableText(table, tokens, pageWidth = 1, pageHeight = 1) {

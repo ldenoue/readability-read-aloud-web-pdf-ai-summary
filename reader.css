@@ -87,6 +87,7 @@ article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.
 .passage.pdf-text var { font-family:Georgia,"Times New Roman",serif; font-style:italic; }
 .passage.code { margin:20px 0 28px; padding:16px 18px; overflow:auto; cursor:text; color:var(--ink); background:var(--surface); border:1px solid var(--line); border-radius:10px; font:13px/1.55 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; white-space:pre; tab-size:2; }
 .passage.code code { font:inherit; }
+.passage.caption { margin:18px 0 10px; font:inherit; }
 .passage.image { margin:28px 0 34px; padding:0; border-radius:0; text-align:center; background:transparent; box-shadow:none; }
 .passage.image img { display:block; width:auto; max-width:100%; max-height:72vh; margin:0 auto 10px; padding:8px; border-radius:0; background:#fff; box-shadow:0 8px 30px color-mix(in srgb,var(--ink) 16%,transparent); }
 .passage.image img.very-tall-image { max-width:min(100%,320px); max-height:52vh; }

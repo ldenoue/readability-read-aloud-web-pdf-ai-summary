@@ -694,6 +694,15 @@ function pdfListingBlocks(page) {
   for (const caption of captions) {
     const pageWidth = caption.layout?.pageWidth || 1;
     const pageHeight = caption.layout?.pageHeight || 1;
+    const explicitContent = blocks.find((block) => block.type === "text"
+      && block.layoutLabel === "Listing-content"
+      && block.listingNumber === caption.listingNumber);
+    if (explicitContent) {
+      listingMembers.add(explicitContent);
+      listingContent.add(explicitContent);
+      listingCaptions.set(caption, explicitContent);
+      continue;
+    }
     let best = null;
     let bestScore = Number.POSITIVE_INFINITY;
     for (const candidate of blocks) {
@@ -821,11 +830,11 @@ function pdfBlockPassages(pages) {
       if (block.layoutLabel === "Text" && /^[,;]+$/u.test(text)) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
-      const isHeading = isTitle || isListingCaption || ["Title", "Section-header"].includes(block.layoutLabel)
+      const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
         || (block.layoutLabel === "Text" && fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
       if (isHeading) text = canonicalPdfSmallCapsHeading(text);
       passages.push({
-        type: isListingContent ? "code" : isHeading ? "heading" : "paragraph",
+        type: isListingContent ? "code" : isListingCaption ? "caption" : isHeading ? "heading" : "paragraph",
         text,
         superscriptRanges,
         subscriptRanges,
