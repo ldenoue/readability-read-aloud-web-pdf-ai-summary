@@ -89,6 +89,7 @@ article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.
 .passage.code code { font:inherit; }
 .passage.image { margin:28px 0 34px; padding:0; border-radius:0; text-align:center; background:transparent; box-shadow:none; }
 .passage.image img { display:block; width:auto; max-width:100%; max-height:72vh; margin:0 auto 10px; padding:8px; border-radius:0; background:#fff; box-shadow:0 8px 30px color-mix(in srgb,var(--ink) 16%,transparent); }
+.passage.image img.very-tall-image { max-width:min(100%,320px); max-height:52vh; }
 .passage.image .sentence { display:inline-block; color:var(--muted); font-size:13px; font-style:italic; }
 .passage.formula { margin:14px 0 18px; padding:6px 8px; overflow:auto; cursor:default; text-align:center; background:var(--paper); border:0; box-shadow:none; }
 .passage.formula:hover, .passage.formula.current { background:var(--paper); box-shadow:none; }
@@ -119,6 +120,7 @@ article h1 { font-size:clamp(32px,5vw,52px); line-height:1.07; letter-spacing:-.
 .citation-preview-media { max-height:260px; margin:7px 0 10px; overflow:hidden; text-align:center; border-radius:8px; background:var(--panel); }
 .citation-preview-media img { display:block; max-width:100%; max-height:260px; margin:auto; object-fit:contain; }
 .citation-preview-media table { width:100%; border-collapse:collapse; background:var(--surface); font-size:10px; line-height:1.25; text-align:left; }
+.citation-preview-media code { display:block; padding:10px 12px; overflow:hidden; color:var(--ink); background:var(--surface); font:12px/1.45 ui-monospace,SFMono-Regular,Consolas,"Liberation Mono",monospace; text-align:left; white-space:pre-wrap; }
 .citation-preview-media th, .citation-preview-media td { padding:4px 5px; border:1px solid var(--line); overflow-wrap:anywhere; }
 .pdf-external-link { color:var(--blue); text-decoration:underline; text-decoration-thickness:1px; text-underline-offset:2px; overflow-wrap:anywhere; }
 .pdf-external-link:hover { background:color-mix(in srgb,var(--blue) 14%,transparent); }

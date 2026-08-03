@@ -684,6 +684,85 @@ function canonicalPdfSmallCapsHeading(text) {
   });
 }
 
+function pdfListingBlocks(page) {
+  const blocks = page.blocks || [];
+  const captions = blocks.filter((block) => block.type === "text"
+    && /^\s*(?:code\s+)?listing\s+\d+(?:\.\d+)*\b/iu.test(String(block.text || "")));
+  const listingContent = new Set();
+  const listingMembers = new Set();
+  const listingCaptions = new Map();
+  for (const caption of captions) {
+    const pageWidth = caption.layout?.pageWidth || 1;
+    const pageHeight = caption.layout?.pageHeight || 1;
+    let best = null;
+    let bestScore = Number.POSITIVE_INFINITY;
+    for (const candidate of blocks) {
+      if (candidate === caption || candidate.type !== "text" || listingMembers.has(candidate) || captions.includes(candidate)) continue;
+      const lines = String(candidate.text || "").split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+      if (lines.length < 3) continue;
+      // Widely letter-spaced listings can arrive as `r e c o g n i t i o n`.
+      // Count visible characters rather than extraction spaces when deciding
+      // whether these are short logical rows.
+      const lengths = lines.map((line) => line.replace(/\s+/gu, "").length).sort((a, b) => a - b);
+      const medianLength = lengths[Math.floor(lengths.length / 2)] || 0;
+      const shortLineRatio = lengths.filter((length) => length <= 48).length / lengths.length;
+      const width = (candidate.layout?.x2 || 0) - (candidate.layout?.x1 || 0);
+      if (medianLength > 48 || shortLineRatio < 0.75 || width > pageWidth * 0.82) continue;
+      const verticalGap = Math.max(0,
+        (candidate.layout?.y1 || 0) - (caption.layout?.y2 || 0),
+        (caption.layout?.y1 || 0) - (candidate.layout?.y2 || 0));
+      const horizontalGap = Math.max(0,
+        (candidate.layout?.x1 || 0) - (caption.layout?.x2 || 0),
+        (caption.layout?.x1 || 0) - (candidate.layout?.x2 || 0));
+      const score = verticalGap / pageHeight + horizontalGap / pageWidth;
+      if (score < bestScore && score <= 0.38) {
+        best = candidate;
+        bestScore = score;
+      }
+    }
+    if (best) {
+      const members = [best];
+      let bounds = { ...best.layout };
+      let expanded = true;
+      while (expanded) {
+        expanded = false;
+        for (const candidate of blocks) {
+          if (candidate === caption || candidate.type !== "text" || members.includes(candidate)
+            || listingMembers.has(candidate) || captions.includes(candidate) || !candidate.layout) continue;
+          const lines = String(candidate.text || "").split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+          const visibleLength = lines.join("").replace(/\s+/gu, "").length;
+          if (!lines.length || lines.length > 2 || visibleLength > 80) continue;
+          const overlap = Math.max(0, Math.min(bounds.x2, candidate.layout.x2) - Math.max(bounds.x1, candidate.layout.x1));
+          const candidateWidth = Math.max(1, candidate.layout.x2 - candidate.layout.x1);
+          const groupWidth = Math.max(1, bounds.x2 - bounds.x1);
+          if (overlap / Math.min(candidateWidth, groupWidth) < 0.55) continue;
+          const verticalGap = Math.max(0, candidate.layout.y1 - bounds.y2, bounds.y1 - candidate.layout.y2);
+          if (verticalGap > pageHeight * 0.045) continue;
+          members.push(candidate);
+          bounds = {
+            ...bounds,
+            x1: Math.min(bounds.x1, candidate.layout.x1), y1: Math.min(bounds.y1, candidate.layout.y1),
+            x2: Math.max(bounds.x2, candidate.layout.x2), y2: Math.max(bounds.y2, candidate.layout.y2),
+          };
+          expanded = true;
+        }
+      }
+      members.sort((left, right) => left.layout.y1 - right.layout.y1 || left.layout.x1 - right.layout.x1);
+      members.forEach((member) => listingMembers.add(member));
+      const combined = {
+        ...best,
+        text: members.map((member) => String(member.text || "").trim()).filter(Boolean).join("\n"),
+        layout: bounds,
+        isBold: members.every((member) => member.isBold),
+        isItalic: members.every((member) => member.isItalic),
+      };
+      listingContent.add(combined);
+      listingCaptions.set(caption, combined);
+    }
+  }
+  return { listingContent, listingMembers, listingCaptions };
+}
+
 function pdfBlockPassages(pages) {
   const sizedBlocks = pages.flatMap((page) => page.blocks || [])
     .filter((block) => block.type === "text" && block.fontSize > 0)
@@ -704,7 +783,15 @@ function pdfBlockPassages(pages) {
     || firstPageText.sort((left, right) => right.fontSize - left.fontSize || (left.layout?.y1 || 0) - (right.layout?.y1 || 0))[0];
   const passages = [];
   for (const page of pages) {
+    const { listingContent, listingMembers, listingCaptions } = pdfListingBlocks(page);
+    const orderedBlocks = [];
     for (const block of page.blocks || []) {
+      if (listingMembers.has(block)) continue;
+      orderedBlocks.push(block);
+      const content = listingCaptions.get(block);
+      if (content) orderedBlocks.push(content);
+    }
+    for (const block of orderedBlocks) {
       const lowerMarginNumber = block.type === "text"
         && /^(?:\d{1,4}|[ivxlcdm]{1,8})$/iu.test(String(block.text || "").trim())
         && block.layout?.pageHeight > 0
@@ -719,12 +806,14 @@ function pdfBlockPassages(pages) {
         passages.push({ type: block.latex ? "formula" : "image", text: "", latex: block.latex || "", image: { src, alt: block.label || "PDF visual", width: block.width, height: block.height }, page: page.page, layout: block.layout });
         continue;
       }
+      const isListingContent = listingContent.has(block);
+      const isListingCaption = listingCaptions.has(block);
       const markedText = repairWrappedPdfUrls(normalizePdfTypography(String(block.text || "")))
         .replace(/-\uE107\s*\n\s*\uE106(?=\p{Ll})/gu, "")
         .replace(/-\n(?=\p{Ll})/gu, "")
-        .replace(/\s*\n\s*/g, " ")
+        .replace(/\s*\n\s*/g, isListingContent ? "\n" : " ")
         .replace(/\s+([,.;:!?%)\]])/g, "$1")
-        .replace(/\s+/g, " ")
+        .replace(isListingContent ? /[^\S\n]+/g : /\s+/g, " ")
         .trim();
       const { text: extractedText, superscriptRanges, subscriptRanges, mathRanges, boldRanges } = extractPdfInlineStyles(markedText);
       let text = extractedText;
@@ -732,11 +821,11 @@ function pdfBlockPassages(pages) {
       if (block.layoutLabel === "Text" && /^[,;]+$/u.test(text)) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
-      const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
+      const isHeading = isTitle || isListingCaption || ["Title", "Section-header"].includes(block.layoutLabel)
         || (block.layoutLabel === "Text" && fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
       if (isHeading) text = canonicalPdfSmallCapsHeading(text);
       passages.push({
-        type: isHeading ? "heading" : "paragraph",
+        type: isListingContent ? "code" : isHeading ? "heading" : "paragraph",
         text,
         superscriptRanges,
         subscriptRanges,
@@ -849,7 +938,7 @@ function isPdfVisualInterruption(passage) {
   if (["image", "table", "formula"].includes(passage?.type)) return true;
   if (!passage?.pdfText) return false;
   return passage.layoutLabel === "Caption"
-    || /^\s*(?:Figure|Fig\.?|Table)\s+\d+[A-Za-z]?\b/iu.test(passage.text || "");
+    || /^\s*(?:Figure|Fig\.?|Table)\s+\d+(?:\.\d+)*[A-Za-z]?\b/iu.test(passage.text || "");
 }
 
 function extractPdfInlineStyles(markedText) {
@@ -928,11 +1017,21 @@ function removeRepeatedPdfMarginals(passages) {
 function removePdfTableOfContents(passages) {
   const heading = passages.find((passage) => passage.pdfText
     && Number.isInteger(passage.page)
-    && /^(?:table\s+of\s+)?contents?\s*$/iu.test(String(passage.text || "").trim()));
+    && /^(?:(?:table\s+of\s+)?contents?|list\s+of\s+(?:figures|tables))\s*$/iu.test(String(passage.text || "").trim()));
   if (!heading) return passages;
 
   const startPage = heading.page;
   const lastPage = Math.max(...passages.map((passage) => Number.isInteger(passage.page) ? passage.page : 0));
+  const isVisualIndex = /^list\s+of\s+(?:figures|tables)\s*$/iu.test(String(heading.text || "").trim());
+  if (isVisualIndex) {
+    let endPage = startPage;
+    for (let page = startPage + 1; page <= Math.min(lastPage, startPage + 8); page++) {
+      const pagePassages = passages.filter((passage) => passage.page === page);
+      if (!looksLikePdfTableOfContentsPage(pagePassages)) break;
+      endPage = page;
+    }
+    return passages.filter((passage) => !Number.isInteger(passage.page) || passage.page < startPage || passage.page > endPage);
+  }
   const nearbyTables = passages.filter((passage) => passage.type === "table"
     && passage.page >= startPage && passage.page <= startPage + 8);
   const destinationPages = nearbyTables.flatMap((passage) => passage.table?.rows || []).flatMap((row) => {
@@ -960,15 +1059,19 @@ function removePdfTableOfContents(passages) {
 
 function startsPdfTableOfContents(passages) {
   return passages.some((passage) => passage.pdfText
-    && /^(?:table\s+of\s+)?contents?\s*$/iu.test(String(passage.text || "").trim()));
+    && /^(?:(?:table\s+of\s+)?contents?|list\s+of\s+(?:figures|tables))\s*$/iu.test(String(passage.text || "").trim()));
 }
 
 function pdfTableOfContentsDestinations(passages) {
-  return passages.filter((passage) => passage.type === "table").flatMap((passage) => passage.table?.rows || []).flatMap((row) => {
+  const tableDestinations = passages.filter((passage) => passage.type === "table").flatMap((passage) => passage.table?.rows || []).flatMap((row) => {
     const lastCell = [...(row.cells || [])].reverse().find((cell) => String(cell.text || "").trim());
     const match = String(lastCell?.text || "").trim().match(/^(\d{1,4})$/u);
     return match ? [Number(match[1])] : [];
   });
+  const standaloneDestinations = passages.filter((passage) => passage.pdfText
+    && /^\d{1,4}$/u.test(String(passage.text || "").trim())
+    && !passage.isPageNumber).map((passage) => Number(passage.text.trim()));
+  return [...tableDestinations, ...standaloneDestinations];
 }
 
 function looksLikePdfTableOfContentsPage(passages) {
@@ -980,7 +1083,13 @@ function looksLikePdfTableOfContentsPage(passages) {
   if (tableRows.length >= 3 && numberedRows.length / tableRows.length >= 0.5) return true;
   const textEntries = passages.filter((passage) => passage.pdfText
     && /^\s*\d+(?:\.\d+)*\s+.+?\s+\d{1,4}\s*$/u.test(String(passage.text || "")));
-  return textEntries.length >= 3;
+  if (textEntries.length >= 3) return true;
+  const visualIndexEntries = passages.filter((passage) => passage.pdfText
+    && /^\s*\d+(?:\.\d+)+(?:\s*\([a-z]\))?\s+.{12,}/iu.test(String(passage.text || "")));
+  const standaloneDestinations = passages.filter((passage) => passage.pdfText
+    && /^\d{1,4}$/u.test(String(passage.text || "").trim()));
+  return visualIndexEntries.length >= 2
+    || visualIndexEntries.length >= 1 && standaloneDestinations.length >= 2;
 }
 
 const PDF_PREPOSED_DIACRITICS = new Map([
@@ -1075,6 +1184,8 @@ function extractPdfLocally(bytes, onPage) {
 }
 
 async function fetchPdf(url, onPage) {
+  const backgroundResult = await extractPdfOffscreen(url, onPage);
+  if (backgroundResult) return backgroundResult;
   setStatus({ state: "loading", message: "Downloading PDF…" });
   const controller = new AbortController();
   let timeout = setTimeout(() => controller.abort(), 60000);
@@ -1127,6 +1238,80 @@ async function fetchPdf(url, onPage) {
   setStatus({ state: "loading", message: `Opening ${(loaded / 1e6).toFixed(1)} MB PDF…` });
   const bytes = pdfBytes.buffer;
   return extractPdfLocally(bytes, onPage);
+}
+
+async function extractPdfOffscreen(url, onPage) {
+  if (typeof BroadcastChannel !== "function" || !chrome.runtime?.sendMessage) return null;
+  const jobId = crypto.randomUUID();
+  const channel = new BroadcastChannel(`pdf-processing-${jobId}`);
+  const pages = new Map();
+  const delivered = new Set();
+  let settled = false;
+  let visibilityHandler;
+  const completion = new Promise((resolve, reject) => {
+    const finish = (callback, value) => {
+      if (settled) return;
+      settled = true;
+      document.removeEventListener("visibilitychange", visibilityHandler);
+      channel.close();
+      callback(value);
+    };
+    channel.onmessage = ({ data }) => {
+      if (data.type === "download-progress") {
+        const progress = data.total
+          ? `${(data.loaded / 1e6).toFixed(1)} / ${(data.total / 1e6).toFixed(1)} MB`
+          : `${(data.loaded / 1e6).toFixed(1)} MB`;
+        setStatus({ state: "loading", message: `Downloading PDF · ${progress}` });
+      } else if (data.type === "opening") {
+        setStatus({ state: "loading", message: data.message || "Opening PDF…" });
+      } else if (data.type === "page") {
+        pages.set(data.page.page, data.page);
+        if (!delivered.has(data.page.page)) {
+          delivered.add(data.page.page);
+          onPage?.(data.page, data.pageCount);
+        }
+      } else if (data.type === "progress") {
+        setStatus({ state: "loading", message: `PDF.js · page ${data.current} of ${data.total}` });
+      } else if (data.type === "math-progress") {
+        const detail = data.progress?.status === "progress" && Number.isFinite(data.progress.progress) ? ` · ${Math.round(data.progress.progress)}%` : "";
+        setStatus({ state: "loading", message: `Loading local math OCR${detail}` });
+      } else if (data.type === "table-progress") {
+        const detail = data.progress?.status === "progress" && Number.isFinite(data.progress.progress) ? ` · ${Math.round(data.progress.progress)}%` : "";
+        setStatus({ state: "loading", message: `Loading local table recognition${detail}` });
+      } else if (data.type === "math-warning") console.warn("Math OCR skipped:", data.message);
+      else if (data.type === "table-warning") console.warn("Table recognition skipped:", data.message);
+      else if (data.type === "result") finish(resolve, {
+        ...data,
+        pages: [...pages.values()].sort((left, right) => left.page - right.page),
+      });
+      else if (data.type === "error") finish(reject, new Error(data.message));
+    };
+    visibilityHandler = () => {
+      if (document.visibilityState === "visible" && !settled) {
+        void chrome.runtime.sendMessage({ type: "pdf-offscreen-snapshot", jobId }).catch(() => {});
+      }
+    };
+    document.addEventListener("visibilitychange", visibilityHandler);
+  });
+  let response;
+  try {
+    response = await chrome.runtime.sendMessage({ type: "pdf-offscreen-start", jobId, url });
+  } catch {
+    document.removeEventListener("visibilitychange", visibilityHandler);
+    channel.close();
+    return null;
+  }
+  if (!response?.supported) {
+    document.removeEventListener("visibilitychange", visibilityHandler);
+    channel.close();
+    return null;
+  }
+  if (response.error) {
+    document.removeEventListener("visibilitychange", visibilityHandler);
+    channel.close();
+    throw new Error(response.error);
+  }
+  return completion;
 }
 
 function chunks(text, limit = 340) {
@@ -1317,31 +1502,35 @@ function normalizeTTSTextForEngine(text) {
 function associatePdfVisuals(passages) {
   const figures = new Set();
   const tables = new Set();
+  const listings = new Set();
   for (const passage of passages) {
     delete passage.figureNumber;
     delete passage.tableNumber;
+    delete passage.listingNumber;
     delete passage.visualCaption;
   }
   for (const caption of passages) {
-    const match = caption.pdfText ? caption.text.match(/^\s*(Figure|Fig\.?|Table)[\s ]+(\d+[A-Za-z]?)/iu) : null;
+    const match = caption.pdfText ? caption.text.match(/^\s*(Figure|Fig\.?|Table|Listing)[\s ]+(\d+(?:\.\d+)*[A-Za-z]?)/iu) : null;
     if (!match) continue;
-    const kind = /^table$/iu.test(match[1]) ? "table" : "figure";
+    const kind = /^table$/iu.test(match[1]) ? "table" : /^listing$/iu.test(match[1]) ? "listing" : "figure";
     const number = match[2].toLowerCase();
     const candidates = passages.filter((passage) => {
       const matchingVisual = kind === "figure"
         ? passage.type === "image" && !/^table$/iu.test(passage.image?.alt || "")
-        : passage.type === "table" || (passage.type === "image" && /^table$/iu.test(passage.image?.alt || ""));
+        : kind === "table"
+          ? passage.type === "table" || (passage.type === "image" && /^table$/iu.test(passage.image?.alt || ""))
+          : passage.type === "code" && passage.pdfText;
       return matchingVisual && passage.page === caption.page && passage.layout
-        && !(kind === "figure" ? passage.figureNumber : passage.tableNumber);
+        && !(kind === "figure" ? passage.figureNumber : kind === "table" ? passage.tableNumber : passage.listingNumber);
     });
     if (!candidates.length) continue;
     const visual = candidates.sort((left, right) => figureCaptionDistance(left.layout, caption.layout) - figureCaptionDistance(right.layout, caption.layout))[0];
-    visual[kind === "figure" ? "figureNumber" : "tableNumber"] = number;
+    visual[kind === "figure" ? "figureNumber" : kind === "table" ? "tableNumber" : "listingNumber"] = number;
     visual.visualCaption = caption.text;
-    caption[kind === "figure" ? "figureCaptionNumber" : "tableCaptionNumber"] = number;
-    (kind === "figure" ? figures : tables).add(number);
+    caption[kind === "figure" ? "figureCaptionNumber" : kind === "table" ? "tableCaptionNumber" : "listingCaptionNumber"] = number;
+    (kind === "figure" ? figures : kind === "table" ? tables : listings).add(number);
   }
-  return { figures, tables };
+  return { figures, tables, listings };
 }
 
 function figureCaptionDistance(image, caption) {
@@ -1353,11 +1542,11 @@ function figureCaptionDistance(image, caption) {
 }
 
 function appendPdfLinkedText(container, text, referenceIndex, visuals, isReferenceEntry) {
-  const pattern = /\b(Figure|Fig\.?|Table)\s+(\d+)([A-Za-z])?(?:\s*(?:,\s*(?:(?:and|&)\s+)?|(?:and|&)\s+)(?:\d+)?[A-Za-z]\b)*/giu;
+  const pattern = /\b(Figure|Fig\.?|Table|Listing)\s+(\d+(?:\.\d+)*)([A-Za-z])?(?:\s*(?:,\s*(?:(?:and|&)\s+)?|(?:and|&)\s+)(?:\d+(?:\.\d+)*)?[A-Za-z]\b)*/giu;
   let offset = 0;
   for (const match of text.matchAll(pattern)) {
     appendPdfCitationText(container, text.slice(offset, match.index), referenceIndex, isReferenceEntry);
-    const kind = /^table$/iu.test(match[1]) ? "table" : "figure";
+    const kind = /^table$/iu.test(match[1]) ? "table" : /^listing$/iu.test(match[1]) ? "listing" : "figure";
     const parentNumber = match[2].toLowerCase();
     const citedNumber = `${parentNumber}${match[3] || ""}`.toLowerCase();
     const number = visuals[`${kind}s`].has(citedNumber)
@@ -1441,16 +1630,18 @@ function appendPdfStyledText(container, text, textStart, superscriptRanges, subs
 function showCitationPreview(citation) {
   const hash = citation.getAttribute("href");
   if (!hash?.startsWith("#pdf-")) return;
-  const target = document.querySelector(hash);
+  const target = document.getElementById(hash.slice(1));
   if (!target) return;
   const preview = $("#citationPreview");
-  const visualMatch = hash.match(/^#pdf-(figure|table)-(.+)$/u);
+  const visualMatch = hash.match(/^#pdf-(figure|table|listing)-(.+)$/u);
   const media = preview.querySelector(".citation-preview-media");
   const description = preview.querySelector("p");
   media.replaceChildren();
   if (visualMatch) {
     preview.querySelector("strong").textContent = `${visualMatch[1]} ${visualMatch[2]}`;
-    const visual = target.querySelector(visualMatch[1] === "table" ? ":scope > table, :scope > img" : ":scope > img");
+    const visual = target.querySelector(visualMatch[1] === "table"
+      ? ":scope > table, :scope > img"
+      : visualMatch[1] === "listing" ? ":scope > code" : ":scope > img");
     if (visual) media.append(visual.cloneNode(true));
     media.hidden = !visual;
     description.textContent = target.dataset.previewCaption || "";
@@ -1559,6 +1750,7 @@ function preserveImageAspectRatio(image, dimensions = {}) {
   const width = Number(dimensions.width);
   const height = Number(dimensions.height);
   if (!(width > 0 && height > 0)) return;
+  image.classList.toggle("very-tall-image", height / width >= 2.6);
   image.width = Math.round(width);
   image.height = Math.round(height);
   image.style.aspectRatio = `${width} / ${height}`;
@@ -1607,6 +1799,7 @@ function render(metadata, passages, sourceUrl) {
     }
     if (passage.figureNumber) element.id = `pdf-figure-${passage.figureNumber}`;
     if (passage.tableNumber) element.id = `pdf-table-${passage.tableNumber}`;
+    if (passage.listingNumber) element.id = `pdf-listing-${passage.listingNumber}`;
     if (passage.visualCaption) element.dataset.previewCaption = passage.visualCaption;
     if (passage.type === "code") {
       const code = document.createElement("code");
@@ -2436,7 +2629,7 @@ $("#article").addEventListener("click", (event) => {
     event.preventDefault();
     event.stopPropagation();
     const hash = citation.getAttribute("href");
-    const target = document.querySelector(hash);
+    const target = hash?.startsWith("#") ? document.getElementById(hash.slice(1)) : null;
     hideCitationPreview(citation);
     if (target && location.hash !== hash) history.pushState({ pdfCitation: hash }, "", hash);
     target?.scrollIntoView({ behavior: "smooth", block: "center" });

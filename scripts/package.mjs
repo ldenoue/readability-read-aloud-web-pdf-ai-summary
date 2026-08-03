@@ -30,6 +30,8 @@ const packageFiles = [
   "library.css",
   "library.html",
   "markdown-export.js",
+  "pdf-offscreen.html",
+  "pdf-offscreen.js",
   "pdfjs-pdf-worker.js",
   "pocket-tts-worker.js",
   "pocket-tts.js",
@@ -58,7 +60,8 @@ for (const browser of browsers) {
 
     const targetManifest = structuredClone(manifest);
     if (browser === "firefox") {
-      targetManifest.background = { scripts: ["service-worker.js"], type: "module" };
+      targetManifest.permissions = targetManifest.permissions.filter((permission) => permission !== "offscreen");
+      targetManifest.background = { scripts: ["pdf-offscreen.js", "service-worker.js"], type: "module" };
       targetManifest.browser_specific_settings = {
         gecko: {
           id: "readability-read-aloud@local",

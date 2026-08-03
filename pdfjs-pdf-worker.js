@@ -33,36 +33,64 @@ self.onmessage = async ({ data }) => {
       isOffscreenCanvasSupported: true,
     });
     const document = await loadingTask.promise;
-    const detector = new DocLayoutDetector({
-      modelUrl: new URL("./models/yolo26n_doc_layout_1280.onnx", import.meta.url).href,
-      wasmPath: new URL("./dist/", import.meta.url).href,
-      inputSize: 1280,
-    });
     const pageCount = document.numPages;
+    let detector;
     let mathRecognizer;
     let tableRecognizer;
+    let frontMatterIndex = "";
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber++) {
       const transfers = [];
       const page = await document.getPage(pageNumber);
-      const viewport = page.getViewport({ scale: PDF_RENDER_SCALE });
+      const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
+      const viewport = page.getViewport({ scale: PDF_RENDER_SCALE, rotation: dominantPdfTextRotation(page, content) });
       const width = Math.max(1, Math.round(viewport.width));
       const height = Math.max(1, Math.round(viewport.height));
-      const canvas = new OffscreenCanvas(width, height);
-      const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
-      await page.render({ canvasContext: context, viewport }).promise;
-      const imageData = context.getImageData(0, 0, width, height);
-      const detections = await detector.detect(imageData.data, width, height);
-      let visuals = visualDetections(detections);
-      const textRegions = detections.filter((region) => ["Text", "Title", "Section-header", "Caption", "Footnote", "List-item"].includes(region.label));
-      const content = await page.getTextContent({ includeMarkedContent: false, disableNormalization: false });
       const tokens = pdfTokens(content, viewport, (fontName) => {
         try { return page.commonObjs?.has(fontName) ? page.commonObjs.get(fontName) : null; }
         catch { return null; }
       });
+      const indexPage = pdfFrontMatterIndexPage(tokens, frontMatterIndex, pageNumber, pageCount);
+      if (indexPage.kind) frontMatterIndex = indexPage.kind;
+      else if (!indexPage.isIndex) frontMatterIndex = "";
+      if (indexPage.isIndex) {
+        self.postMessage({ type: "page", page: { page: pageNumber, blocks: [] }, pageCount });
+        if (typeof page.cleanup === "function") page.cleanup();
+        self.postMessage({ type: "progress", current: pageNumber, total: document.numPages });
+        continue;
+      }
+      const canvas = new OffscreenCanvas(width, height);
+      const context = canvas.getContext("2d", { alpha: false, willReadFrequently: true });
+      await page.render({ canvasContext: context, viewport }).promise;
+      const imageData = context.getImageData(0, 0, width, height);
+      detector ||= new DocLayoutDetector({
+        modelUrl: new URL("./models/yolo26n_doc_layout_1280.onnx", import.meta.url).href,
+        wasmPath: new URL("./dist/", import.meta.url).href,
+        inputSize: 1280,
+      });
+      const detections = await detector.detect(imageData.data, width, height);
+      let visuals = visualDetections(detections);
+      const textRegions = detections.filter((region) => ["Text", "Title", "Section-header", "Caption", "Footnote", "List-item"].includes(region.label));
       // YOLO occasionally labels a single inline radical as a Formula. Keep
       // the positioned PDF glyph in that case; treating it as a visual would
       // remove it from the sentence and create a detached OCR formula block.
       visuals = visuals.filter((visual) => !isInlinePdfMathDetection(visual, tokens));
+      const originalObliqueTables = new Set(visuals.filter((visual) => visual.label === "Table" && hasObliqueTableText(visual, tokens, width, height)));
+      const expandedTables = [...originalObliqueTables]
+        .map((visual) => expandObliqueTableVisual(visual, tokens, textRegions, width, height))
+        .sort((left, right) => regionArea(right) - regionArea(left));
+      if (expandedTables.length) {
+        const retainedTables = [];
+        for (const table of expandedTables) {
+          if (!retainedTables.some((retained) => containment(table, retained) >= 0.72)) retainedTables.push(table);
+        }
+        visuals = [
+          ...retainedTables,
+          ...visuals.filter((visual) => {
+            if (originalObliqueTables.has(visual)) return false;
+            return !retainedTables.some((table) => containment(visual, table) >= 0.65);
+          }),
+        ];
+      }
       let blocks = liftPdfTextRegions(tokens, textRegions, visuals);
 
       for (const visual of visuals) {
@@ -83,7 +111,7 @@ self.onmessage = async ({ data }) => {
           try { latex = await mathRecognizer.recognize(crop); }
           catch (error) { self.postMessage({ type: "math-warning", message: error instanceof Error ? error.message : String(error) }); }
         }
-        if (visual.label === "Table") {
+        if (visual.label === "Table" && !visual.obliqueFallback && !hasObliqueTableText(visual, tokens, width, height)) {
           tableRecognizer ||= new TableStructureRecognizer({
             wasmPath: new URL("./dist/math-runtime/", import.meta.url).href,
             onProgress: (progress) => self.postMessage({ type: "table-progress", progress }),
@@ -118,6 +146,31 @@ self.onmessage = async ({ data }) => {
   }
 };
 
+function dominantPdfTextRotation(page, content) {
+  const baseRotation = ((Number(page.rotate) || 0) % 360 + 360) % 360;
+  const items = (content.items || []).filter((item) => item.str?.trim() && item.transform);
+  const totalCharacters = items.reduce((sum, item) => sum + item.str.trim().length, 0);
+  if (totalCharacters < 20) return baseRotation;
+  const scores = [0, 90, 180, 270].map((addition) => {
+    const rotation = (baseRotation + addition) % 360;
+    const viewport = page.getViewport({ scale: 1, rotation });
+    const score = items.reduce((sum, item) => {
+      const transform = pdfjs.Util.transform(viewport.transform, item.transform);
+      const angle = Math.atan2(transform[1], transform[0]);
+      const forwardFacing = Math.abs(Math.sin(angle)) <= 0.35 && Math.cos(angle) >= 0.7;
+      return sum + (forwardFacing ? item.str.trim().length : 0);
+    }, 0);
+    return { rotation, score };
+  });
+  const baseScore = scores.find((candidate) => candidate.rotation === baseRotation)?.score || 0;
+  const best = scores.sort((left, right) => right.score - left.score)[0];
+  return best.rotation !== baseRotation
+    && best.score >= totalCharacters * 0.55
+    && best.score >= Math.max(20, baseScore * 1.5)
+    ? best.rotation
+    : baseRotation;
+}
+
 function pdfTokens(content, viewport, fontLookup = () => null) {
   const unicodeOffsets = shiftedPdfFontUnicodeOffsets(content);
   return content.items.flatMap((item, itemIndex) => {
@@ -150,9 +203,158 @@ function pdfTokens(content, viewport, fontLookup = () => null) {
       descentX: -normalUnitX * descent, descentY: -normalUnitY * descent,
       itemIndex,
       isHorizontal: Math.abs(Math.sin(angle)) <= 0.35,
+      textAngle: angle,
     };
     return splitItemTokens(itemBox);
   });
+}
+
+function pdfFrontMatterIndexPage(tokens, activeKind = "", pageNumber = 1, pageCount = 1) {
+  const rows = tokenRows(tokens.filter((token) => token.isHorizontal)).map((row) => joinRowTokens(row)
+    .replace(/[\uE100-\uE107]/gu, "")
+    .replace(/\s+/gu, " ")
+    .trim()).filter(Boolean);
+  const heading = rows.map((row) => row.toLocaleLowerCase()).find((row) =>
+    /^(?:table of contents|contents|list of figures|list of tables)$/u.test(row));
+  const kind = heading?.includes("figures") ? "figures"
+    : heading?.includes("tables") ? "tables"
+      : heading ? "contents" : "";
+  const canStart = pageNumber <= Math.max(12, Math.ceil(pageCount * 0.2));
+  if (kind && canStart) return { isIndex: true, kind };
+  if (!activeKind) return { isIndex: false, kind: "" };
+
+  const numberedEntries = rows.filter((row) =>
+    /^(?:\d+(?:\.\d+)*|[A-Z]\.\d+)\s+.{8,}\s+\d{1,4}$/u.test(row));
+  const leaderEntries = rows.filter((row) =>
+    /(?:\s*\.){2,}\s*\d{1,4}$/u.test(row));
+  const destinationNumbers = rows.filter((row) => /^\d{1,4}$/u.test(row));
+  const isIndex = numberedEntries.length >= 2
+    || leaderEntries.length >= 2
+    || numberedEntries.length >= 1 && destinationNumbers.length >= 2;
+  return { isIndex, kind: "" };
+}
+
+function hasObliqueTableText(table, tokens, pageWidth = 1, pageHeight = 1) {
+  const nearby = {
+    x1: Math.max(0, table.x1 - pageWidth * 0.08), y1: Math.max(0, table.y1 - pageHeight * 0.12),
+    x2: Math.min(pageWidth, table.x2 + pageWidth * 0.08), y2: Math.min(pageHeight, table.y2 + pageHeight * 0.12),
+  };
+  const contained = tokens.filter((token) => containment(token, nearby) >= 0.35 && /\S/u.test(token.text));
+  if (contained.length < 3) return false;
+  let totalCharacters = 0;
+  let obliqueCharacters = 0;
+  let obliqueTokens = 0;
+  for (const token of contained) {
+    const characters = [...token.text].filter((character) => /\S/u.test(character)).length;
+    if (!characters) continue;
+    totalCharacters += characters;
+    const angle = Math.abs(Math.atan2(Math.sin(token.textAngle || 0), Math.cos(token.textAngle || 0)));
+    const axisDistance = Math.min(angle, Math.abs(Math.PI / 2 - angle), Math.abs(Math.PI - angle));
+    // A small skew is common in scanned documents. Only count text that is
+    // visibly angled away from both the horizontal and vertical page axes.
+    if (axisDistance >= Math.PI / 18) {
+      obliqueCharacters += characters;
+      obliqueTokens += 1;
+    }
+  }
+  return obliqueTokens >= 3
+    && obliqueCharacters >= 12
+    && obliqueCharacters / Math.max(1, totalCharacters) >= 0.12;
+}
+
+function expandObliqueTableVisual(table, tokens, textRegions, pageWidth, pageHeight) {
+  const captionRegions = textRegions.filter((region) => region.label === "Caption");
+  const tokenIsCaption = (token) => captionRegions.some((region) => containment(token, region) >= 0.35);
+  const regionText = (region) => tokenRows(tokens.filter((token) => containment(token, region) >= 0.35))
+    .map((row) => joinRowTokens(row).replace(/[\uE100-\uE107]/gu, ""))
+    .join(" ").replace(/\s+/gu, " ").trim();
+  const tableCaptionRow = tokenRows(tokens.filter((token) => token.isHorizontal)).map((row) => ({
+    row,
+    text: joinRowTokens(row).replace(/[\uE100-\uE107]/gu, "").replace(/\s+/gu, " ").trim(),
+    y1: Math.min(...row.map((token) => token.y1)),
+    y2: Math.max(...row.map((token) => token.y2)),
+  })).filter((row) => row.y1 >= table.y2
+    && row.y1 - table.y2 <= pageHeight * 0.35
+    && /^Table\s+\d+(?:\.\d+)*/iu.test(row.text))
+    .sort((left, right) => left.y1 - right.y1)[0] || null;
+  const tableCaption = textRegions.filter((region) => region.y1 >= table.y2
+    && region.y1 - table.y2 <= pageHeight * 0.28
+    && (region.label === "Caption" || /^Table\s+\d+(?:\.\d+)*/iu.test(regionText(region))))
+    .sort((left, right) => {
+      const leftIsTable = /^Table\s+\d+(?:\.\d+)*/iu.test(regionText(left));
+      const rightIsTable = /^Table\s+\d+(?:\.\d+)*/iu.test(regionText(right));
+      return Number(rightIsTable) - Number(leftIsTable) || left.y1 - right.y1;
+    })[0] || null;
+  const bounds = { ...table };
+  // Angled headers are sometimes classified as a separate Picture rather
+  // than Text. Grow through their positioned PDF glyphs before considering
+  // neighboring horizontal label regions.
+  for (const token of tokens) {
+    if (tokenIsCaption(token) || Math.abs(Math.sin(token.textAngle || 0)) < 0.25) continue;
+    const horizontalGap = Math.max(0, token.x1 - bounds.x2, bounds.x1 - token.x2);
+    const verticalGap = Math.max(0, token.y1 - bounds.y2, bounds.y1 - token.y2);
+    if (horizontalGap > pageWidth * 0.05 || verticalGap > pageHeight * 0.14) continue;
+    bounds.x1 = Math.min(bounds.x1, token.x1);
+    bounds.y1 = Math.min(bounds.y1, token.y1);
+    bounds.x2 = Math.max(bounds.x2, token.x2);
+    bounds.y2 = Math.max(bounds.y2, token.y2);
+  }
+  // A YOLO Text box can begin in the middle of one PDF.js text item. Include
+  // unclaimed horizontal prefix tokens (for example `Integration` and `Rule`)
+  // whenever they occupy the same physical rows as the table.
+  for (const token of tokens) {
+    if (tokenIsCaption(token) || !token.isHorizontal) continue;
+    const verticalOverlap = Math.max(0, Math.min(bounds.y2, token.y2) - Math.max(bounds.y1, token.y1));
+    if (verticalOverlap / Math.max(1, Math.min(bounds.y2 - bounds.y1, token.y2 - token.y1)) < 0.55) continue;
+    const horizontalGap = Math.max(0, token.x1 - bounds.x2, bounds.x1 - token.x2);
+    if (horizontalGap > pageWidth * 0.18) continue;
+    bounds.x1 = Math.min(bounds.x1, token.x1);
+    bounds.x2 = Math.max(bounds.x2, token.x2);
+  }
+  let changed = true;
+  while (changed) {
+    changed = false;
+    for (const region of textRegions) {
+      if (region.label === "Caption") continue;
+      const regionTokens = tokens.filter((token) => containment(token, region) >= 0.35 && !tokenIsCaption(token));
+      const text = regionTokens.map((token) => token.text).join(" ").trim();
+      if (!text || text.replace(/\s+/gu, "").length > 90 || /[.!?]\s*$/u.test(text)) continue;
+      const contentBounds = {
+        x1: Math.min(region.x1, ...regionTokens.map((token) => token.x1)),
+        y1: Math.min(region.y1, ...regionTokens.map((token) => token.y1)),
+        x2: Math.max(region.x2, ...regionTokens.map((token) => token.x2)),
+        y2: Math.max(region.y2, ...regionTokens.map((token) => token.y2)),
+      };
+      const horizontalOverlap = Math.max(0, Math.min(bounds.x2, contentBounds.x2) - Math.max(bounds.x1, contentBounds.x1));
+      const horizontalGap = Math.max(0, contentBounds.x1 - bounds.x2, bounds.x1 - contentBounds.x2);
+      const verticalGap = Math.max(0, contentBounds.y1 - bounds.y2, bounds.y1 - contentBounds.y2);
+      const verticalOverlap = Math.max(0, Math.min(bounds.y2, contentBounds.y2) - Math.max(bounds.y1, contentBounds.y1));
+      const sharesTableRows = verticalOverlap / Math.max(1, Math.min(bounds.y2 - bounds.y1, contentBounds.y2 - contentBounds.y1)) >= 0.45;
+      if (horizontalOverlap / Math.max(1, Math.min(bounds.x2 - bounds.x1, contentBounds.x2 - contentBounds.x1)) < 0.2
+        && horizontalGap > pageWidth * (sharesTableRows ? 0.18 : 0.045)) continue;
+      if (verticalGap > pageHeight * 0.13) continue;
+      const expandsBounds = contentBounds.x1 < bounds.x1 || contentBounds.y1 < bounds.y1 || contentBounds.x2 > bounds.x2 || contentBounds.y2 > bounds.y2;
+      if (!expandsBounds) continue;
+      bounds.x1 = Math.min(bounds.x1, contentBounds.x1);
+      bounds.y1 = Math.min(bounds.y1, contentBounds.y1);
+      bounds.x2 = Math.max(bounds.x2, contentBounds.x2);
+      bounds.y2 = Math.max(bounds.y2, contentBounds.y2);
+      changed = true;
+    }
+  }
+  const padding = Math.max(4, Math.round(Math.min(pageWidth, pageHeight) * 0.006));
+  const captionTop = tableCaptionRow?.y1 ?? tableCaption?.y1;
+  if (Number.isFinite(captionTop)) bounds.y2 = Math.max(table.y2, captionTop - padding * 2);
+  return {
+    ...table,
+    x1: Math.max(0, bounds.x1 - padding), y1: Math.max(0, bounds.y1 - padding),
+    x2: Math.min(pageWidth, bounds.x2 + padding), y2: Math.min(pageHeight, bounds.y2 + padding),
+    obliqueFallback: true,
+  };
+}
+
+function regionArea(region) {
+  return Math.max(0, region.x2 - region.x1) * Math.max(0, region.y2 - region.y1);
 }
 
 function shiftedPdfFontUnicodeOffsets(content) {
@@ -219,7 +421,7 @@ function splitItemTokens(item) {
       [startX + item.descentX, startY + item.descentY], [endX + item.descentX, endY + item.descentY],
     ];
     return {
-      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, baselineY: startY, isBold: item.isBold, isItalic: item.isItalic, isMath: item.isMath, isHorizontal: item.isHorizontal,
+      text: match[0], itemIndex: item.itemIndex, tokenIndex, fontSize: item.fontSize, baselineY: startY, isBold: item.isBold, isItalic: item.isItalic, isMath: item.isMath, isHorizontal: item.isHorizontal, textAngle: item.textAngle,
       x1: Math.min(...points.map((point) => point[0])), y1: Math.min(...points.map((point) => point[1])),
       x2: Math.max(...points.map((point) => point[0])), y2: Math.max(...points.map((point) => point[1])),
     };
@@ -413,11 +615,19 @@ function joinRowTokens(tokens) {
   const baseline = baselines[Math.floor(baselines.length / 2)] || 0;
   let text = "";
   let previous = null;
+  const mostlyIndividualGlyphs = tokens.length >= 4
+    && tokens.filter((token) => [...token.text].length === 1).length / tokens.length >= 0.65;
+  const positiveGaps = tokens.slice(1).map((token, index) => token.x1 - tokens[index].x2)
+    .filter((gap) => gap > 0).sort((left, right) => left - right);
+  const typicalGlyphGap = positiveGaps[Math.floor(positiveGaps.length / 2)] || 0;
   for (const token of tokens) {
     if (previous) {
       const gap = token.x1 - previous.x2;
       const fontSize = Math.max(1, Math.min(previous.fontSize || 1, token.fontSize || 1));
-      if (gap > fontSize * 0.16) text += " ";
+      const wordGap = mostlyIndividualGlyphs
+        ? gap > Math.max(fontSize * 0.42, typicalGlyphGap * 1.75)
+        : gap > fontSize * 0.16;
+      if (wordGap) text += " ";
     }
     const isSuperscript = token.fontSize <= medianFontSize * 0.85
       && token.baselineY <= baseline - medianFontSize * 0.12;

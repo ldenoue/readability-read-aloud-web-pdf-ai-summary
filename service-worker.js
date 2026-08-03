@@ -29,6 +29,40 @@ async function configureYouTubeEmbedIdentity() {
 
 void configureYouTubeEmbedIdentity();
 
+let creatingPdfOffscreenDocument;
+
+async function ensurePdfOffscreenDocument() {
+  // Firefox runs this alongside pdf-offscreen.js in its persistent extension
+  // background page, where a dedicated Worker can run without an offscreen
+  // document and without inheriting the reader tab's lifecycle.
+  if (!chrome.offscreen?.createDocument) return typeof Worker === "function";
+  if (await chrome.offscreen.hasDocument?.()) return true;
+  creatingPdfOffscreenDocument ||= chrome.offscreen.createDocument({
+    url: "pdf-offscreen.html",
+    reasons: [chrome.offscreen.Reason.DOM_PARSER],
+    justification: "Process local PDF pages without pausing when the reader tab is backgrounded.",
+  }).finally(() => { creatingPdfOffscreenDocument = null; });
+  await creatingPdfOffscreenDocument;
+  return true;
+}
+
+chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+  if (!message?.type?.startsWith("pdf-offscreen-")) return false;
+  void (async () => {
+    if (!await ensurePdfOffscreenDocument()) {
+      sendResponse({ supported: false });
+      return;
+    }
+    const response = await chrome.runtime.sendMessage({
+      ...message,
+      target: "pdf-offscreen",
+      type: message.type.replace("pdf-offscreen-", "pdf-"),
+    });
+    sendResponse({ supported: true, ...response });
+  })().catch((error) => sendResponse({ supported: true, error: error instanceof Error ? error.message : String(error) }));
+  return true;
+});
+
 async function pointsToPdf(url) {
   if (/\.pdf(?:$|[?#])/i.test(url)) return true;
   try {

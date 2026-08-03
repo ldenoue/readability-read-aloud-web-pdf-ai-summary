@@ -3,7 +3,7 @@
   "name": "Readability Read Aloud",
   "version": "0.28.1",
   "description": "Read articles, PDFs, chats, X articles, and YouTube transcripts with private local AI summaries and speech.",
-  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "tabs", "declarativeNetRequestWithHostAccess"],
+  "permissions": ["activeTab", "scripting", "storage", "unlimitedStorage", "tabs", "declarativeNetRequestWithHostAccess", "offscreen"],
   "host_permissions": ["http://*/*", "https://*/*", "file:///*"],
   "background": {
     "service_worker": "service-worker.js",
