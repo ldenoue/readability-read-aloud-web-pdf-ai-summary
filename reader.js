@@ -830,11 +830,12 @@ function pdfBlockPassages(pages) {
       if (block.layoutLabel === "Text" && /^[,;]+$/u.test(text)) continue;
       const fontRatio = (block.fontSize || bodyFontSize) / bodyFontSize;
       const isTitle = block === likelyTitleBlock;
-      const isHeading = isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
-        || (block.layoutLabel === "Text" && fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text));
+      const isVisualCaption = /^\s*(?:Figure|Fig\.?|Table)\s+\d+(?:\.\d+)*[A-Za-z]?\b/iu.test(text);
+      const isHeading = !isVisualCaption && (isTitle || ["Title", "Section-header"].includes(block.layoutLabel)
+        || (block.layoutLabel === "Text" && fontRatio >= 1.45 && text.length <= 180 && !/[.!?]$/u.test(text)));
       if (isHeading) text = canonicalPdfSmallCapsHeading(text);
       passages.push({
-        type: isListingContent ? "code" : isListingCaption ? "caption" : isHeading ? "heading" : "paragraph",
+        type: isListingContent ? "code" : isListingCaption || isVisualCaption ? "caption" : isHeading ? "heading" : "paragraph",
         text,
         superscriptRanges,
         subscriptRanges,
@@ -1766,6 +1767,26 @@ function preserveImageAspectRatio(image, dimensions = {}) {
   image.style.height = "auto";
 }
 
+function appendChatGptReferenceLink(element, referenceText, documentTitle) {
+  const text = String(referenceText || "").trim();
+  if (!text) return;
+  const title = String(documentTitle || "this document").trim();
+  const prompt = `Key points about this reference please. It was cited in the context of "${title}":\n\n${text}`;
+  const link = document.createElement("a");
+  link.className = "chatgpt-reference-link";
+  link.href = `https://chatgpt.com/?prompt=${encodeURIComponent(prompt)}`;
+  link.target = "_blank";
+  link.rel = "noopener noreferrer";
+  link.title = "Ask ChatGPT about this reference";
+  link.setAttribute("aria-label", "Ask ChatGPT about this reference");
+  const icon = document.createElement("img");
+  icon.src = "icons/openai.svg";
+  icon.alt = "";
+  icon.setAttribute("aria-hidden", "true");
+  link.append(icon);
+  element.append(link);
+}
+
 function render(metadata, passages, sourceUrl) {
   const article = $("#article");
   activeSourceUrl = sourceUrl;
@@ -1876,6 +1897,9 @@ function render(metadata, passages, sourceUrl) {
       else appendLinkedPassageText(span, sentence, passage.links);
       element.append(span);
     });
+    if (referenceNumber || authorYearReference) {
+      appendChatGptReferenceLink(element, authorYearReference?.previewText || passage.text, title);
+    }
     if (passage.chatRole) {
       let message = chatGroups.get(passage.chatGroup);
       if (!message) {
@@ -1893,6 +1917,32 @@ function render(metadata, passages, sourceUrl) {
       message.append(element);
     } else article.append(element);
   });
+  updateArticleOutline();
+}
+
+function updateArticleOutline() {
+  const outline = $("#articleOutline");
+  outline.replaceChildren();
+  const headings = [...$("#article").querySelectorAll("h1, h2, .passage.heading")]
+    .filter((heading, index, all) => heading.textContent.trim() && all.indexOf(heading) === index);
+  const usedIds = new Set();
+  for (const [index, heading] of headings.entries()) {
+    const label = heading.textContent.replace(/\s+/gu, " ").trim();
+    let id = heading.id || `section-${label.toLocaleLowerCase().normalize("NFKD").replace(/[^\p{L}\p{N}]+/gu, "-").replace(/^-|-$/gu, "").slice(0, 52) || index + 1}`;
+    const baseId = id;
+    let suffix = 2;
+    while (usedIds.has(id) || document.getElementById(id) && document.getElementById(id) !== heading) id = `${baseId}-${suffix++}`;
+    usedIds.add(id);
+    heading.id = id;
+    heading.style.scrollMarginTop = "84px";
+    const link = document.createElement("a");
+    link.href = `#${id}`;
+    link.textContent = label;
+    link.dataset.level = heading.matches("h1") && !heading.matches(".passage.heading:not(.pdf-title)") ? "1" : "2";
+    outline.append(link);
+  }
+  $("#outlineEmpty").hidden = headings.length > 0;
+  $("#outlineMenu").disabled = headings.length === 0;
 }
 
 function safePdfFilename(value) {
@@ -2559,6 +2609,56 @@ async function loadArticle() {
   setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
 }
 
+function setControlsOpen(open) {
+  const panel = $("#controlsPanel");
+  const menu = $("#controlsMenu");
+  const backdrop = $("#controlsBackdrop");
+  if (open) setOutlineOpen(false, false);
+  document.body.classList.toggle("controls-open", open);
+  menu.setAttribute("aria-expanded", String(open));
+  panel.setAttribute("aria-hidden", String(!open));
+  backdrop.hidden = !open;
+  if (open) $("#closeControls").focus();
+  else if (document.activeElement === $("#closeControls") || panel.contains(document.activeElement)) menu.focus();
+}
+
+function setOutlineOpen(open, restoreFocus = true) {
+  const panel = $("#outlinePanel");
+  const menu = $("#outlineMenu");
+  const backdrop = $("#controlsBackdrop");
+  if (open) setControlsOpen(false);
+  document.body.classList.toggle("outline-open", open);
+  menu.setAttribute("aria-expanded", String(open));
+  panel.setAttribute("aria-hidden", String(!open));
+  backdrop.hidden = !(open || document.body.classList.contains("controls-open"));
+  if (open) $("#closeOutline").focus();
+  else if (restoreFocus && (document.activeElement === $("#closeOutline") || panel.contains(document.activeElement))) menu.focus();
+}
+
+function closeReaderPanels() {
+  setControlsOpen(false);
+  setOutlineOpen(false, false);
+}
+
+$("#controlsMenu").addEventListener("click", () => setControlsOpen(!document.body.classList.contains("controls-open")));
+$("#closeControls").addEventListener("click", () => setControlsOpen(false));
+$("#outlineMenu").addEventListener("click", () => setOutlineOpen(!document.body.classList.contains("outline-open")));
+$("#closeOutline").addEventListener("click", () => setOutlineOpen(false));
+$("#controlsBackdrop").addEventListener("click", closeReaderPanels);
+$("#articleOutline").addEventListener("click", (event) => {
+  const link = event.target.closest("a[href^='#']");
+  if (!link) return;
+  const target = document.getElementById(link.hash.slice(1));
+  if (!target) return;
+  event.preventDefault();
+  history.pushState({ articleSection: link.hash }, "", link.hash);
+  setOutlineOpen(false, false);
+  target.scrollIntoView({ behavior: "smooth", block: "start" });
+});
+document.addEventListener("keydown", (event) => {
+  if (event.key === "Escape" && (document.body.classList.contains("controls-open") || document.body.classList.contains("outline-open"))) closeReaderPanels();
+});
+
 $("#play").addEventListener("click", readArticle);
 $("#stop").addEventListener("click", stopReading);
 $("#exportPdf").addEventListener("click", () => { void exportCurrentArticle(); });
@@ -2632,7 +2732,7 @@ $("#clearCache").addEventListener("click", async () => {
 $("#article").addEventListener("click", (event) => {
   const selection = window.getSelection();
   if (selection && !selection.isCollapsed && selection.toString().trim()) return;
-  if (event.target.closest("a.pdf-external-link")) return;
+  if (event.target.closest("a.pdf-external-link, a.chatgpt-reference-link")) return;
   const citation = event.target.closest("a.pdf-citation");
   if (citation) {
     event.preventDefault();
@@ -2670,6 +2770,7 @@ $("#article").addEventListener("focusout", (event) => {
 });
 $("#article").addEventListener("keydown", (event) => {
   if (event.key !== "Enter" && event.key !== " ") return;
+  if (event.target.closest("a, button")) return;
   const passage = event.target.closest(".passage");
   if (!passage) return;
   event.preventDefault();

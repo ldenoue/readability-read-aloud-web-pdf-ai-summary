@@ -16,11 +16,23 @@
         <span aria-hidden="true">⌕</span>
         <input name="q" type="search" placeholder="Search saved articles and PDFs" autocomplete="off" aria-label="Search saved articles and PDFs" />
       </form>
-      <div class="status" id="status" data-state="loading"><i></i><span>Preparing article…</span></div>
+      <div class="header-actions">
+        <div class="status" id="status" data-state="loading"><i></i><span>Preparing article…</span></div>
+        <button id="outlineMenu" class="outline-menu" type="button" aria-label="Open table of contents" aria-controls="outlinePanel" aria-expanded="false">
+          <span></span><span></span><span></span>
+        </button>
+        <button id="controlsMenu" class="controls-menu" type="button" aria-label="Open reading and speech options" aria-controls="controlsPanel" aria-expanded="false">
+          <span></span><span></span><span></span>
+        </button>
+      </div>
     </header>
 
     <main id="top">
-      <aside class="controls">
+      <aside id="controlsPanel" class="controls" role="dialog" aria-modal="true" aria-labelledby="controlsTitle" aria-hidden="true">
+        <div class="controls-heading">
+          <div><span>Reader options</span><strong id="controlsTitle">Speech &amp; export</strong></div>
+          <button id="closeControls" type="button" aria-label="Close reading and speech options">×</button>
+        </div>
         <div class="source-card">
           <div class="source-heading">
             <span>Source</span>
@@ -114,6 +126,15 @@
         </article>
       </div>
     </main>
+    <aside id="outlinePanel" class="outline-panel" role="dialog" aria-modal="true" aria-labelledby="outlineTitle" aria-hidden="true">
+      <div class="controls-heading">
+        <div><span>On this page</span><strong id="outlineTitle">Table of contents</strong></div>
+        <button id="closeOutline" type="button" aria-label="Close table of contents">×</button>
+      </div>
+      <nav id="articleOutline" class="article-outline" aria-label="Article sections"></nav>
+      <p id="outlineEmpty" class="outline-empty">No section headings were found.</p>
+    </aside>
+    <button id="controlsBackdrop" class="controls-backdrop" type="button" aria-label="Close open panel" hidden></button>
 
     <aside id="citationPreview" class="citation-preview" role="tooltip" hidden>
       <strong></strong>
