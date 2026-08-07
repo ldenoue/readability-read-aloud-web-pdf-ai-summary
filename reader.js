@@ -677,6 +677,7 @@ function canonicalPdfSmallCapsHeading(text) {
   let wordIndex = 0;
   return String(text).replace(/[\p{L}\p{M}]+/gu, (word) => {
     const index = wordIndex++;
+    if (/\p{Ll}\p{Lu}/u.test(word)) return word;
     if (/^\p{Lu}{2,5}$/u.test(word)) return word;
     const lower = word.toLocaleLowerCase();
     if (index > 0 && /^(?:a|an|and|as|at|by|for|in|of|on|or|the|to|with)$/u.test(lower)) return lower;
@@ -687,11 +688,12 @@ function canonicalPdfSmallCapsHeading(text) {
 function pdfListingBlocks(page) {
   const blocks = page.blocks || [];
   const captions = blocks.filter((block) => block.type === "text"
-    && /^\s*(?:code\s+)?listing\s+\d+(?:\.\d+)*\b/iu.test(String(block.text || "")));
+    && /^\s*(?:(?:code\s+)?listing|algorithm)\s+\d+(?:\.\d+)*\b/iu.test(String(block.text || "")));
   const listingContent = new Set();
   const listingMembers = new Set();
   const listingCaptions = new Map();
   for (const caption of captions) {
+    const isAlgorithm = /^\s*algorithm\s+\d/iu.test(String(caption.text || ""));
     const pageWidth = caption.layout?.pageWidth || 1;
     const pageHeight = caption.layout?.pageHeight || 1;
     const explicitContent = blocks.find((block) => block.type === "text"
@@ -716,7 +718,7 @@ function pdfListingBlocks(page) {
       const medianLength = lengths[Math.floor(lengths.length / 2)] || 0;
       const shortLineRatio = lengths.filter((length) => length <= 48).length / lengths.length;
       const width = (candidate.layout?.x2 || 0) - (candidate.layout?.x1 || 0);
-      if (medianLength > 48 || shortLineRatio < 0.75 || width > pageWidth * 0.82) continue;
+      if (medianLength > 48 || shortLineRatio < 0.75 || width > pageWidth * (isAlgorithm ? 0.96 : 0.82)) continue;
       const verticalGap = Math.max(0,
         (candidate.layout?.y1 || 0) - (caption.layout?.y2 || 0),
         (caption.layout?.y1 || 0) - (candidate.layout?.y2 || 0));
@@ -1065,6 +1067,41 @@ function removePdfTableOfContents(passages) {
     }
   }
   return passages.filter((passage) => !Number.isInteger(passage.page) || passage.page < startPage || passage.page > endPage);
+}
+
+function removePdfSupplementaryOverview(passages) {
+  const overviewHeadings = passages.filter((passage) => passage.pdfText
+    && Number.isInteger(passage.page)
+    && /^supplement(?:ary|al)\s+(?:overview|contents|table\s+of\s+contents)\s*$/iu.test(String(passage.text || "").trim()));
+  const supplementaryTitles = passages.filter((passage) => passage.pdfText
+    && Number.isInteger(passage.page)
+    && /^supplementary\s+material\s+for\b/iu.test(String(passage.text || "").trim()));
+  const anchors = overviewHeadings.length ? overviewHeadings : supplementaryTitles;
+  if (!anchors.length) return passages;
+
+  const overviewTables = new Set();
+  for (const heading of anchors) {
+    for (const passage of passages) {
+      if (passage.page !== heading.page || passage.type !== "table") continue;
+      if (Number.isFinite(heading.layout?.y1) && Number.isFinite(passage.layout?.y2)
+        && passage.layout.y2 < heading.layout.y1) continue;
+      const rows = passage.table?.rows || [];
+      const indexedRows = rows.filter((row) => {
+        const cells = row.cells || [];
+        const section = String(cells[0]?.text || "").trim();
+        const rowText = cells.map((cell) => String(cell.text || "").trim()).filter(Boolean).join(" ");
+        return /^(?:[A-Z](?:\.\d+)*|\d+(?:\.\d+)*)$/u.test(section)
+          && /(?:\.{2,}|\s)\s*\d{1,4}\s*$/u.test(rowText);
+      });
+      if (rows.length >= 3 && indexedRows.length / rows.length >= 0.5) overviewTables.add(passage);
+    }
+  }
+
+  if (!overviewTables.size) return passages;
+  const overviewPages = new Set([...overviewTables].map((passage) => passage.page));
+  const overviewLabels = new Set([...overviewHeadings, ...supplementaryTitles]
+    .filter((passage) => overviewPages.has(passage.page)));
+  return passages.filter((passage) => !overviewLabels.has(passage) && !overviewTables.has(passage));
 }
 
 function startsPdfTableOfContents(passages) {
@@ -2534,7 +2571,7 @@ async function loadArticle() {
     let streamingTableOfContents = false;
     let streamingContentsDestination = null;
     const extracted = await fetchPdf(pdfUrl, (page, pageCount) => {
-      const rawPassages = pdfBlockPassages([page]);
+      const rawPassages = removePdfSupplementaryOverview(pdfBlockPassages([page]));
       if (startsPdfTableOfContents(rawPassages)) {
         streamingTableOfContents = true;
         const destinations = pdfTableOfContentsDestinations(rawPassages)
@@ -2564,7 +2601,7 @@ async function loadArticle() {
       state.passages = rawPassages.map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     }
     if (extracted.format === "blocks") {
-      state.passages = mergePdfColumnContinuations(removePdfTableOfContents(removeRepeatedPdfMarginals(state.passages)))
+      state.passages = mergePdfColumnContinuations(removePdfSupplementaryOverview(removePdfTableOfContents(removeRepeatedPdfMarginals(state.passages))))
         .map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     }
     if (!state.passages.length) throw new Error("This PDF contains no extractable text. Scanned PDFs require OCR.");
