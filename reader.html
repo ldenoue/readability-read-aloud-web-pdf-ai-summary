@@ -9,90 +9,53 @@
   <body>
     <header>
       <div class="header-navigation">
-        <a class="brand" href="library.html"><img src="icons/icon.svg" alt="" aria-hidden="true" /> Readability Reader</a>
-        <a class="library-button" href="library.html">Library</a>
+        <a class="library-button" href="library.html" aria-label="Library" data-tooltip="Library">
+          <svg class="material-symbol" viewBox="0 -960 960 960" aria-hidden="true"><path d="M220-180h150v-220q0-13 9-21.5t21-8.5h160q13 0 21.5 8.5T590-400v220h150v-390L480-765 220-570v390Zm-60 0v-390q0-14 6-27t18-21l260-195q16-12 36-12t36 12l260 195q11 8 17.5 21t6.5 27v390q0 25-17.5 42.5T740-120H560q-13 0-21.5-8.5T530-150v-220H430v220q0 13-8.5 21.5T400-120H220q-25 0-42.5-17.5T160-180Z"/></svg>
+        </a>
+        <button id="play" class="header-action header-play" type="button" title="Read article" data-tooltip="Read article" disabled>
+          <span class="action-label">Read article</span>
+          <svg class="action-icon material-symbol" viewBox="0 -960 960 960" aria-hidden="true">
+            <path class="play-shape" d="M320-258v-450q0-14 9-22t21-8q4 0 8 1t8 3l354 226q7 5 10.5 11t3.5 14q0 8-3.5 14T720-458L366-232q-4 2-8 3t-8 1q-12 0-21-8t-9-22Zm60-54 269-171-269-171v342Z"/>
+            <path class="pause-shape" d="M585-200q-25 0-42.5-17.5T525-260v-440q0-25 17.5-42.5T585-760h115q25 0 42.5 17.5T760-700v440q0 25-17.5 42.5T700-200H585Zm0-60h115v-440H585v440Zm-325 60q-25 0-42.5-17.5T200-260v-440q0-25 17.5-42.5T260-760h115q25 0 42.5 17.5T435-700v440q0 25-17.5 42.5T375-200H260Zm0-60h115v-440H260v440Z"/>
+          </svg>
+        </button>
+        <select id="voice" class="header-voice" aria-label="Reading voice" title="Reading voice">
+          <option value="alba">Alba</option>
+          <option value="jean">Jean</option>
+          <option value="marius">Marius</option>
+          <option value="javert">Javert</option>
+          <option value="fantine">Fantine</option>
+          <option value="cosette">Cosette</option>
+          <option value="eponine">Éponine</option>
+          <option value="azelma" selected>Azelma</option>
+        </select>
       </div>
-      <form class="header-search" action="library.html" method="get" role="search">
-        <span aria-hidden="true">⌕</span>
-        <input name="q" type="search" placeholder="Search saved articles and PDFs" autocomplete="off" aria-label="Search saved articles and PDFs" />
-      </form>
       <div class="header-actions">
         <div class="status" id="status" data-state="loading"><i></i><span>Preparing article…</span></div>
-        <button id="outlineMenu" class="outline-menu" type="button" aria-label="Open table of contents" aria-controls="outlinePanel" aria-expanded="false">
-          <span></span><span></span><span></span>
+        <button id="reprocessPdf" class="header-action" type="button" title="Reprocess PDF" data-tooltip="Reprocess PDF" aria-label="Reprocess PDF" hidden>
+          <svg class="material-symbol" viewBox="0 -960 960 960" aria-hidden="true"><path d="M480-160q-133 0-226.5-93.5T160-480q0-133 93.5-226.5T480-800q85 0 149 34.5T740-671v-99q0-13 8.5-21.5T770-800q13 0 21.5 8.5T800-770v194q0 13-8.5 21.5T770-546H576q-13 0-21.5-8.5T546-576q0-13 8.5-21.5T576-606h138q-38-60-97-97t-137-37q-109 0-184.5 75.5T220-480q0 109 75.5 184.5T480-220q75 0 140-39.5T717-366q5-11 16.5-16.5t22.5-.5q12 5 16 16.5t-1 23.5q-39 84-117.5 133.5T480-160Z"/></svg>
         </button>
-        <button id="controlsMenu" class="controls-menu" type="button" aria-label="Open reading and speech options" aria-controls="controlsPanel" aria-expanded="false">
-          <span></span><span></span><span></span>
+        <button id="deleteDocument" class="header-action delete-document" type="button" title="Delete from library" data-tooltip="Delete from library" aria-label="Delete from library" hidden>
+          <svg class="material-symbol" viewBox="0 -960 960 960" aria-hidden="true"><path d="M261-120q-25 0-42.5-17.5T201-180v-570h-11q-13 0-21.5-8.5T160-780q0-13 8.5-21.5T190-810h158q0-13 8.5-21.5T378-840h204q13 0 21.5 8.5T612-810h158q13 0 21.5 8.5T800-780q0 13-8.5 21.5T770-750h-11v570q0 25-17.5 42.5T699-120H261Zm438-630H261v570h438v-570ZM397-274q13 0 21.5-8.5T427-304v-331q0-13-8.5-21.5T397-665q-13 0-21.5 8.5T367-635v331q0 13 8.5 21.5T397-274Zm166 0q13 0 21.5-8.5T593-304v-331q0-13-8.5-21.5T563-665q-13 0-21.5 8.5T533-635v331q0 13 8.5 21.5T563-274Z"/></svg>
+        </button>
+        <button id="exportMarkdown" class="header-action" type="button" title="Download Markdown" data-tooltip="Download Markdown" aria-label="Download Markdown" disabled>
+          <svg class="file-icon material-symbol" viewBox="0 -960 960 960" aria-hidden="true"><path d="m610-475-27-27q-9-9-21-8.5t-21 9.5q-9 9-9 21t9 21l78 78q9 9 21 9t21-9l78-78q9-9 9-21t-9-21q-9-9-21.5-9t-21.5 9l-26 26v-95q0-13-8.5-21.5T640-600q-13 0-21.5 8.5T610-570v95ZM140-160q-24 0-42-18t-18-42v-520q0-24 18-42t42-18h680q24 0 42 18t18 42v520q0 24-18 42t-42 18H140Zm0-60h680v-520H140v520Zm129-330h53v102q0 11 7 18t18 7q11 0 18-7t7-18v-102h60v165q0 11 7 18t18 7q11 0 18-7t7-18v-175q0-14-13-27t-27-13H259q-14 0-27 13t-13 27v175q0 11 7 18t18 7q11 0 18-7t7-18v-165Z"/></svg>
+        </button>
+        <button id="exportPdf" class="header-action" type="button" title="Export as PDF" data-tooltip="Export as PDF" aria-label="Export as PDF" disabled>
+          <svg class="file-icon material-symbol" viewBox="0 -960 960 960" aria-hidden="true"><path d="M368-514h48q16 0 26.5-10.5T453-551v-48q0-16-10.5-26.5T416-636h-66q-8 0-13.5 5t-5.5 13v169q0 8 5.5 13t13.5 5q8 0 13-5.5t5-13.5v-64Zm0-37v-48h48v48h-48Zm213 120q15 0 26-10.5t11-26.5v-131q0-16-11-26.5T581-636h-65q-8 0-13.5 5t-5.5 13v168q0 8 5.5 13.5T516-431h65Zm-47-37v-131h47v131h-47Zm170-46h32q8 0 13-5.5t5-13.5q0-8-5-13t-13-5h-32v-48h32q8 0 13-5.5t5-13.5q0-8-5-13t-13-5h-50q-8 0-13.5 5t-5.5 13v169q0 8 5.5 13t13.5 5q8 0 13-5.5t5-13.5v-64ZM260-200q-24 0-42-18t-18-42v-560q0-24 18-42t42-18h560q24 0 42 18t18 42v560q0 24-18 42t-42 18H260Zm0-60h560v-560H260v560ZM140-80q-24 0-42-18t-18-42v-590q0-13 8.5-21.5T110-760q13 0 21.5 8.5T140-730v590h590q13 0 21.5 8.5T760-110q0 13-8.5 21.5T730-80H140Z"/></svg>
         </button>
       </div>
     </header>
+    <div hidden>
+      <a id="sourceLink"></a>
+      <button id="stop" type="button" disabled></button>
+      <button id="copyMarkdown" type="button" disabled></button>
+    </div>
+    <button id="outlineMenu" class="outline-menu" type="button" aria-label="Open table of contents" data-tooltip="Table of contents" aria-controls="outlinePanel" aria-expanded="false">
+      <svg class="material-symbol" viewBox="0 -960 960 960" aria-hidden="true"><path d="M150-240q-13 0-21.5-8.5T120-270q0-13 8.5-21.5T150-300h660q13 0 21.5 8.5T840-270q0 13-8.5 21.5T810-240H150Zm0-210q-13 0-21.5-8.5T120-480q0-13 8.5-21.5T150-510h660q13 0 21.5 8.5T840-480q0 13-8.5 21.5T810-450H150Zm0-210q-13 0-21.5-8.5T120-690q0-13 8.5-21.5T150-720h660q13 0 21.5 8.5T840-690q0 13-8.5 21.5T810-660H150Z"/></svg>
+    </button>
 
     <main id="top">
-      <aside id="controlsPanel" class="controls" role="dialog" aria-modal="true" aria-labelledby="controlsTitle" aria-hidden="true">
-        <div class="controls-heading">
-          <div><span>Reader options</span><strong id="controlsTitle">Speech &amp; export</strong></div>
-          <button id="closeControls" type="button" aria-label="Close reading and speech options">×</button>
-        </div>
-        <div class="source-card">
-          <div class="source-heading">
-            <span>Source</span>
-            <div class="source-actions">
-              <button id="reprocessPdf" type="button" title="Reprocess this PDF" aria-label="Reprocess this PDF" hidden>↻</button>
-              <button id="deleteDocument" class="delete-document" type="button" title="Delete from local library" aria-label="Delete from local library" hidden>×</button>
-            </div>
-          </div>
-          <a id="sourceLink" target="_blank" rel="noopener"></a>
-        </div>
-
-        <label class="field">TTS provider
-          <select id="provider">
-            <option value="pocket" selected>PocketTTS · higher quality</option>
-            <option value="inflect">Inflect · lighter</option>
-          </select>
-        </label>
-
-        <label class="field" id="inflectModelField" hidden>Inflect model
-          <select id="model">
-            <option value="micro" selected>Micro · better quality</option>
-            <option value="nano">Nano · lighter</option>
-          </select>
-        </label>
-
-        <label class="field" id="pocketVoiceField">PocketTTS voice
-          <select id="voice">
-            <option value="alba">Alba</option>
-            <option value="jean">Jean</option>
-            <option value="marius">Marius</option>
-            <option value="javert">Javert</option>
-            <option value="fantine">Fantine</option>
-            <option value="cosette">Cosette</option>
-            <option value="eponine">Éponine</option>
-            <option value="azelma" selected>Azelma</option>
-          </select>
-        </label>
-
-        <label class="field" id="speedField" hidden>Playback speed
-          <select id="speed">
-            <option value="1" selected>1×</option>
-            <option value="1.25">1.25×</option>
-            <option value="1.5">1.5×</option>
-            <option value="1.75">1.75×</option>
-            <option value="2">2×</option>
-          </select>
-        </label>
-
-        <div class="transport">
-          <button id="play" class="primary" type="button" disabled><i>▶</i><span>Read article</span></button>
-          <button id="stop" type="button" disabled>Stop</button>
-        </div>
-        <div class="export-actions">
-          <button id="exportPdf" class="secondary-button export-button export-pdf" type="button" disabled>Export article as PDF</button>
-          <button id="exportMarkdown" class="secondary-button export-button" type="button" disabled>Download MD</button>
-          <button id="copyMarkdown" class="secondary-button export-button" type="button" disabled>Export MD</button>
-        </div>
-        <button id="clearCache" class="cache-button" type="button">Clear all cached models/voices</button>
-      </aside>
-
       <div class="reading-column">
         <section id="youtubePlayerPanel" class="youtube-player-panel" hidden>
           <div class="youtube-player-heading">
@@ -103,7 +66,8 @@
             <iframe id="youtubePlayer" title="YouTube video player" allow="autoplay; encrypted-media; picture-in-picture" allowfullscreen></iframe>
           </div>
         </section>
-        <section id="summaryPanel" class="summary-panel" aria-live="polite">
+        <a id="chatGptSummaryLink" class="chatgpt-summary-link" href="https://chatgpt.com" target="_blank" rel="noopener noreferrer">Summary and key points with ChatGPT</a>
+        <section id="summaryPanel" class="summary-panel" aria-live="polite" hidden>
           <div class="summary-heading">
             <span>Local AI Summary</span>
             <select id="summaryProvider" aria-label="Local summary model">
@@ -135,6 +99,7 @@
       <p id="outlineEmpty" class="outline-empty">No section headings were found.</p>
     </aside>
     <button id="controlsBackdrop" class="controls-backdrop" type="button" aria-label="Close open panel" hidden></button>
+    <button id="selectionHighlight" class="selection-highlight" type="button" hidden>Highlight</button>
 
     <aside id="citationPreview" class="citation-preview" role="tooltip" hidden>
       <strong></strong>

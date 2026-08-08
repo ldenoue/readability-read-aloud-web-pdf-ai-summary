@@ -268,13 +268,18 @@ function pdfListingsFromTokens(tokens) {
   const seenNumbers = new Set();
   for (let index = 0; index < rows.length; index += 1) {
     const caption = rows[index];
-    const match = caption.text.match(/^\s*(?:Code\s+)?Listing\s+(\d+(?:\.\d+)*)\b/iu);
-    if (!match || seenNumbers.has(match[1].toLowerCase())) continue;
+    const match = caption.text.match(/^\s*((?:Code\s+)?Listing|Algorithm)\s+(\d+(?:\.\d+)*)\b/iu);
+    const kind = match?.[1].toLocaleLowerCase().includes("algorithm") ? "algorithm" : "listing";
+    const key = match ? `${kind}:${match[2].toLowerCase()}` : "";
+    if (!match || seenNumbers.has(key)) continue;
     const contentRows = [];
+    let numberedAlgorithmRows = 0;
     let previous = caption;
     for (let nextIndex = index + 1; nextIndex < rows.length && contentRows.length < 80; nextIndex += 1) {
       const row = rows[nextIndex];
-      if (/^\s*(?:Code\s+)?Listing\s+\d/iu.test(row.text)) break;
+      if (/^\s*(?:(?:Code\s+)?Listing|Algorithm)\s+\d/iu.test(row.text)) break;
+      const numberedAlgorithmRow = /^\d{1,3}\s*:/u.test(row.text);
+      if (kind === "algorithm" && numberedAlgorithmRows >= 3 && !numberedAlgorithmRow) break;
       const gap = row.y1 - previous.y2;
       const lineHeight = Math.max(previous.fontSize, row.fontSize, 1);
       const headingLike = /^\p{Lu}[\p{L}\p{N} '&/-]{0,45}$/u.test(row.text) && !/[#=|,()[\]]/u.test(row.text);
@@ -282,17 +287,34 @@ function pdfListingsFromTokens(tokens) {
       if (gap > lineHeight * (contentRows.length ? 2.25 : 3.2)) break;
       if (contentRows.length >= 3 && gap > lineHeight * 1.5 && /[.!?]\s*$/u.test(row.text)) break;
       contentRows.push(row);
+      if (numberedAlgorithmRow) numberedAlgorithmRows += 1;
       previous = row;
     }
-    if (!contentRows.length) continue;
-    seenNumbers.add(match[1].toLowerCase());
+    if (!contentRows.length || kind === "algorithm" && numberedAlgorithmRows < 3) continue;
+    seenNumbers.add(key);
     const contentBounds = {
       x1: Math.min(...contentRows.map((row) => row.x1)), y1: Math.min(...contentRows.map((row) => row.y1)),
       x2: Math.max(...contentRows.map((row) => row.x2)), y2: Math.max(...contentRows.map((row) => row.y2)),
     };
+    let contentText;
+    if (kind === "algorithm") {
+      const numberedRows = contentRows.filter((row) => /^\d{1,3}\s*:/u.test(row.text));
+      const statementStarts = numberedRows.map((row) => {
+        const threshold = row.x1 + row.fontSize * 2.6;
+        return row.tokens.find((token) => token.x1 >= threshold)?.x1;
+      }).filter(Number.isFinite);
+      const baseStatementX = statementStarts.length ? Math.min(...statementStarts) : 0;
+      contentText = contentRows.map((row) => {
+        const match = row.text.match(/^(\d{1,3})\s*:\s*(.*)$/u);
+        if (!match || !baseStatementX) return row.text;
+        const threshold = row.x1 + row.fontSize * 2.6;
+        const statementX = row.tokens.find((token) => token.x1 >= threshold)?.x1 || baseStatementX;
+        const indentation = Math.max(0, Math.min(16, Math.round((statementX - baseStatementX) / Math.max(1, row.fontSize * 0.52))));
+        return `${match[1]}: ${" ".repeat(indentation)}${match[2]}`;
+      }).join("\n");
+    } else contentText = contentRows.map((row) => row.text).join("\n");
     listings.push({
-      number: match[1].toLowerCase(), captionText: caption.text,
-      contentText: contentRows.map((row) => row.text).join("\n"),
+      number: match[2].toLowerCase(), captionText: caption.text, contentText,
       captionFontSize: caption.fontSize,
       contentFontSize: contentRows.map((row) => row.fontSize).sort((left, right) => left - right)[Math.floor(contentRows.length / 2)] || 1,
       captionBounds: { x1: caption.x1, y1: caption.y1, x2: caption.x2, y2: caption.y2 },

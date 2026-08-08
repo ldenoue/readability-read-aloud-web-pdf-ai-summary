@@ -69,6 +69,15 @@ export async function updateDocumentSummary(id, summary) {
   return document;
 }
 
+export async function updateDocumentPassageHighlights(id, passageHighlights) {
+  const document = await getDocument(id);
+  if (!document) return null;
+  document.passageHighlights = passageHighlights;
+  document.updatedAt = Date.now();
+  await documents.setItem(id, document);
+  return document;
+}
+
 export async function removeDocument(id) {
   await documents.removeItem(id);
 }

@@ -9,10 +9,6 @@
   <body>
     <header>
       <a class="brand" href="library.html"><img src="icons/icon.svg" alt="" aria-hidden="true" /> Readability Reader</a>
-      <label class="header-search">
-        <span aria-hidden="true">⌕</span>
-        <input id="search" type="search" placeholder="Search saved articles and PDFs" autocomplete="off" autofocus aria-label="Search saved articles and PDFs" />
-      </label>
       <span>Local library</span>
     </header>
     <main>
@@ -20,9 +16,19 @@
         <p class="eyebrow">Your private reading history</p>
         <h1>Find anything you’ve read.</h1>
         <p>Articles and processed PDFs stay on this device. Search titles, addresses, and content - or use local semantic search to find related ideas.</p>
-        <div class="search-meta"><span id="status">Loading recent documents…</span><button id="clearLibrary" type="button" hidden>Clear library</button></div>
+        <div class="search-meta">
+          <span id="status">Loading recent documents…</span>
+          <div class="library-actions">
+            <button id="clearModels" type="button">Clear cached models/voices</button>
+            <button id="clearLibrary" type="button" hidden>Clear library</button>
+          </div>
+        </div>
       </section>
       <section>
+        <label class="library-search">
+          <span aria-hidden="true">⌕</span>
+          <input id="search" type="search" placeholder="Search saved articles and PDFs" autocomplete="off" autofocus aria-label="Search saved articles and PDFs" />
+        </label>
         <h2 id="resultsHeading">Recently viewed</h2>
         <div id="results" class="results" aria-live="polite"></div>
         <div id="empty" class="empty" hidden>

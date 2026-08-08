@@ -240,6 +240,29 @@ $("#clearLibrary").addEventListener("click", async () => {
   void runSearch();
 });
 
+$("#clearModels").addEventListener("click", async () => {
+  if (!confirm("Clear all locally cached reading voices and AI models? They will be downloaded again when needed.")) return;
+  const button = $("#clearModels");
+  button.disabled = true;
+  const previousStatus = $("#status").textContent;
+  $("#status").textContent = "Clearing cached models and voices…";
+  try {
+    await Promise.all([
+      caches.delete("inflect-onnx-models-v1"),
+      caches.delete("pocket-tts-assets-v1"),
+      caches.delete("transformers-cache"),
+    ]);
+    $("#status").textContent = "Cached models and voices cleared";
+  } catch (error) {
+    $("#status").textContent = `Could not clear cached models: ${error.message}`;
+  } finally {
+    button.disabled = false;
+    setTimeout(() => {
+      if ($("#status").textContent === "Cached models and voices cleared") $("#status").textContent = previousStatus;
+    }, 2500);
+  }
+});
+
 try {
   library = await listDocuments({ limit: 100 });
   searchIndex = await createIndex();

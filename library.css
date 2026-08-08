@@ -10,9 +10,9 @@ header { height:64px; padding:0 28px; border-bottom:1px solid var(--line); backg
 header > span { color:var(--muted); font-size:12px; }
 .brand { color:var(--ink); text-decoration:none; font-weight:800; display:flex; align-items:center; gap:9px; white-space:nowrap; }
 .brand img { width:25px; height:25px; border-radius:6px; }
-.header-search { width:min(620px,55vw); height:38px; margin-right:auto; display:flex; align-items:center; gap:8px; padding:0 12px; border:1px solid var(--line); border-radius:9px; background:var(--paper); }
-.header-search:focus-within { border-color:var(--blue); box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 15%,transparent); }
-.header-search > span { color:var(--blue); font-size:19px; line-height:1; }
+.library-search { width:100%; height:46px; margin:0 0 24px; display:flex; align-items:center; gap:10px; padding:0 14px; border:1px solid var(--line); border-radius:10px; background:var(--surface); }
+.library-search:focus-within { border-color:var(--blue); box-shadow:0 0 0 2px color-mix(in srgb,var(--blue) 15%,transparent); }
+.library-search > span { color:var(--blue); font-size:20px; line-height:1; }
 .eyebrow { color:var(--blue); }
 main { width:min(920px,100%); margin:auto; padding:72px 28px 100px; }
 .hero { max-width:760px; margin-bottom:58px; }
@@ -20,9 +20,10 @@ main { width:min(920px,100%); margin:auto; padding:72px 28px 100px; }
 h1 { margin:0; font-size:clamp(38px,7vw,64px); line-height:1.04; letter-spacing:-.05em; }
 .hero > p:not(.eyebrow) { max-width:650px; color:var(--muted); font-size:17px; }
 input { min-width:0; flex:1; color:var(--ink); background:transparent; border:0; outline:0; font:600 17px Inter,sans-serif; }
-.header-search input { font-size:13px; }
+.library-search input { font-size:15px; }
 input::placeholder { color:var(--muted); font-weight:400; }
 .search-meta { min-height:27px; margin-top:10px; color:var(--muted); font-size:12px; display:flex; justify-content:space-between; align-items:center; }
+.library-actions { display:flex; align-items:center; gap:14px; }
 button { color:var(--orange); background:transparent; border:0; cursor:pointer; font:700 12px Inter,sans-serif; }
 h2 { margin:0 0 18px; font-size:20px; }
 .results { display:grid; gap:12px; }
@@ -41,4 +42,4 @@ h2 { margin:0 0 18px; font-size:20px; }
 .empty > img { width:48px; height:48px; border-radius:12px; }
 .empty h2 { color:var(--ink); margin:8px 0 3px; }
 .empty p { margin:0; }
-@media (max-width:700px) { header { padding:0 16px; gap:12px; } header > span { display:none; } .brand { font-size:0; } .brand img { width:29px; height:29px; } .header-search { width:auto; flex:1; } main { padding:45px 16px 70px; } .card { padding-left:17px; } }
+@media (max-width:700px) { header { padding:0 16px; gap:12px; } header > span { display:none; } .brand { font-size:0; } .brand img { width:29px; height:29px; } main { padding:45px 16px 70px; } .search-meta { align-items:flex-start; gap:10px; } .library-actions { flex-wrap:wrap; justify-content:flex-end; gap:8px 12px; } .card { padding-left:17px; } }

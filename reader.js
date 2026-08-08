@@ -1,20 +1,19 @@
-import { InflectTTS } from "./inflect-tts.js";
 import { PocketTTS } from "./pocket-tts.js";
 import { marked } from "./dist/marked.esm.js";
 import { renderMath } from "./dist/katex-render.js";
 import { linkMatches } from "./dist/linkify.js";
 import { renderArticlePdf } from "./dist/pdf-export.js";
 import { articleToMarkdown } from "./markdown-export.js";
-import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentSummary } from "./dist/library-store.js";
+import { embeddingTexts, getDocument, getDocumentByUrl, removeDocument, saveDocument, touchDocument, updateDocumentEmbeddings, updateDocumentPassageHighlights, updateDocumentSummary } from "./dist/library-store.js";
 import { embedTexts } from "./embedding-client.js";
-import { clearGemmaSummarizer, measureGemmaTokens, summarizeWithGemma } from "./summary-client.js";
+import { measureGemmaTokens, summarizeWithGemma } from "./summary-client.js";
 import { getLocalYouTubeTranscript, youtubeTranscriptArticle } from "./youtube-transcript.js";
 
 const $ = (selector) => document.querySelector(selector);
-const state = { passages: [], index: 0, sentence: 0, run: 0, reading: false, language: "" };
-const inflectTts = new InflectTTS({ model: "micro", onStatus: setStatus });
+const state = { passages: [], highlights: [], index: 0, sentence: 0, run: 0, reading: false, autoScroll: true, language: "" };
+let pendingTextHighlight = null;
 const pocketTts = new PocketTTS({ voice: "azelma", onStatus: setStatus });
-const activeTts = () => $("#provider").value === "pocket" ? pocketTts : inflectTts;
+const activeTts = () => pocketTts;
 let summaryLanguagePromise = null;
 const SUMMARIZER_LANGUAGES = ["en", "fr", "de", "es", "ja"];
 let summaryApiSupported = false;
@@ -407,20 +406,10 @@ async function summarizeWithGemmaModel() {
   }
 }
 
-function applyProviderUI() {
-  const provider = $("#provider").value;
-  $("#inflectModelField").hidden = provider !== "inflect";
-  $("#pocketVoiceField").hidden = provider !== "pocket";
-  $("#speedField").hidden = provider !== "inflect";
-}
-
 async function savePreferences() {
   await chrome.storage.local.set({
     readerPreferences: {
-      provider: $("#provider").value,
-      model: $("#model").value,
       voice: $("#voice").value,
-      speed: $("#speed").value,
       summaryProvider: $("#summaryProvider").value,
     },
   });
@@ -428,15 +417,10 @@ async function savePreferences() {
 
 async function restorePreferences() {
   const { readerPreferences = {} } = await chrome.storage.local.get("readerPreferences");
-  if (["pocket", "inflect"].includes(readerPreferences.provider)) $("#provider").value = readerPreferences.provider;
-  if (InflectTTS.MODELS[readerPreferences.model]) $("#model").value = readerPreferences.model;
   if (PocketTTS.VOICES.includes(readerPreferences.voice)) $("#voice").value = readerPreferences.voice;
-  if ([...$("#speed").options].some((option) => option.value === readerPreferences.speed)) $("#speed").value = readerPreferences.speed;
   const savedSummaryProvider = readerPreferences.summaryProvider === "lfm" ? "gemma" : readerPreferences.summaryProvider;
   if (["chrome", "gemma"].includes(savedSummaryProvider)) $("#summaryProvider").value = savedSummaryProvider;
-  inflectTts.setModel($("#model").value);
   pocketTts.setVoice($("#voice").value);
-  applyProviderUI();
   updateSummaryControls();
 }
 
@@ -633,6 +617,13 @@ function passageSentences(passage) {
   return passage.type === "code" || !passage.text ? [] : sentences(passage.text);
 }
 
+function passageSpeechSentences(passage) {
+  if (passage.type === "image") return ["See figure."];
+  if (passage.type === "formula") return ["See mathematical formula."];
+  if (passage.type === "table") return ["See table."];
+  return passage.sentences;
+}
+
 function pdfMarkdownPassages(markdown, sourceUrl) {
   const html = marked.parse(markdown, { gfm: true, breaks: false });
   return htmlPassages(html, sourceUrl).map((passage) => ({ ...passage, pdfText: passage.type !== "image" }));
@@ -685,6 +676,22 @@ function canonicalPdfSmallCapsHeading(text) {
   });
 }
 
+function looksLikeStructuredPdfRows(value) {
+  const lines = String(value || "").split(/\r?\n/u)
+    .map((line) => line.replace(/[\uE100-\uE107]/gu, "").trim())
+    .filter(Boolean);
+  if (lines.length < 5) return false;
+
+  const structuredRows = lines.filter((line) => /^(?:input|output)\s*:|^\d{1,3}\s*:/iu.test(line));
+  const lengths = lines.map((line) => [...line.replace(/\s+/gu, "")].length).sort((a, b) => a - b);
+  const lowerQuartile = lengths[Math.floor(lengths.length * 0.25)] || 0;
+  const upperQuartile = lengths[Math.floor(lengths.length * 0.75)] || 0;
+  const unevenWidths = upperQuartile >= 20 && lowerQuartile <= upperQuartile * 0.62;
+  return structuredRows.length >= 3
+    && structuredRows.length / lines.length >= 0.3
+    && unevenWidths;
+}
+
 function pdfListingBlocks(page) {
   const blocks = page.blocks || [];
   const captions = blocks.filter((block) => block.type === "text"
@@ -709,7 +716,8 @@ function pdfListingBlocks(page) {
     let bestScore = Number.POSITIVE_INFINITY;
     for (const candidate of blocks) {
       if (candidate === caption || candidate.type !== "text" || listingMembers.has(candidate) || captions.includes(candidate)) continue;
-      const lines = String(candidate.text || "").split(/\r?\n/u).map((line) => line.trim()).filter(Boolean);
+      const lines = String(candidate.text || "").split(/\r?\n/u)
+        .map((line) => line.replace(/[\uE100-\uE107]/gu, "").trim()).filter(Boolean);
       if (lines.length < 3) continue;
       // Widely letter-spaced listings can arrive as `r e c o g n i t i o n`.
       // Count visible characters rather than extraction spaces when deciding
@@ -717,8 +725,18 @@ function pdfListingBlocks(page) {
       const lengths = lines.map((line) => line.replace(/\s+/gu, "").length).sort((a, b) => a - b);
       const medianLength = lengths[Math.floor(lengths.length / 2)] || 0;
       const shortLineRatio = lengths.filter((length) => length <= 48).length / lengths.length;
+      const structuredLineRatio = lines.filter((line) => /^(?:input|output)\s*:|^\d{1,3}\s*:/iu.test(line)).length / lines.length;
+      const unevenLineLengths = lengths.at(-1) - lengths[0] >= 24;
       const width = (candidate.layout?.x2 || 0) - (candidate.layout?.x1 || 0);
-      if (medianLength > 48 || shortLineRatio < 0.75 || width > pageWidth * (isAlgorithm ? 0.96 : 0.82)) continue;
+      const looksLikeAlgorithmBody = isAlgorithm
+        && structuredLineRatio >= 0.35
+        && unevenLineLengths
+        && medianLength <= 120
+        && width <= pageWidth * 0.96;
+      const looksLikeListingBody = medianLength <= 48
+        && shortLineRatio >= 0.75
+        && width <= pageWidth * 0.82;
+      if (!looksLikeAlgorithmBody && !looksLikeListingBody) continue;
       const verticalGap = Math.max(0,
         (candidate.layout?.y1 || 0) - (caption.layout?.y2 || 0),
         (caption.layout?.y1 || 0) - (candidate.layout?.y2 || 0));
@@ -817,7 +835,7 @@ function pdfBlockPassages(pages) {
         passages.push({ type: block.latex ? "formula" : "image", text: "", latex: block.latex || "", image: { src, alt: block.label || "PDF visual", width: block.width, height: block.height }, page: page.page, layout: block.layout });
         continue;
       }
-      const isListingContent = listingContent.has(block);
+      const isListingContent = listingContent.has(block) || looksLikeStructuredPdfRows(block.text);
       const isListingCaption = listingCaptions.has(block);
       const markedText = repairWrappedPdfUrls(normalizePdfTypography(String(block.text || "")))
         .replace(/-\uE107\s*\n\s*\uE106(?=\p{Ll})/gu, "")
@@ -1828,17 +1846,39 @@ function render(metadata, passages, sourceUrl) {
   const article = $("#article");
   activeSourceUrl = sourceUrl;
   activeMetadata = metadata;
+  $("#chatGptSummaryLink").href = `https://chatgpt.com?prompt=${encodeURIComponent(`Summary and key points of ${sourceUrl}`)}`;
   setupYouTubePlayer(sourceUrl);
   article.replaceChildren();
   article.classList.toggle("youtube-transcript", Boolean(youtubeIdFromUrl(sourceUrl)));
   const title = metadata.title || passages.find((passage) => passage.type === "heading")?.text || new URL(sourceUrl).hostname;
+  const details = [metadata.author, metadata.site, metadata.published?.slice(0, 10)].filter(Boolean);
+  const appendArticleMetadata = () => {
+    if (article.querySelector(".article-source")) return;
+    const source = document.createElement("a");
+    source.className = "article-source";
+    source.href = sourceUrl;
+    source.target = "_blank";
+    source.rel = "noopener noreferrer";
+    try { source.textContent = `Source: ${new URL(sourceUrl).hostname}`; }
+    catch { source.textContent = "Source"; }
+    article.append(source);
+    if (details.length) {
+      const byline = document.createElement("p");
+      byline.className = "byline";
+      byline.textContent = details.join(" · ");
+      article.append(byline);
+    } else source.classList.add("article-source-standalone");
+  };
   if (!metadata.hideTitle) {
     const heading = document.createElement("h1");
     heading.textContent = title;
     article.append(heading);
+    appendArticleMetadata();
   }
-  const details = [metadata.author, metadata.site, metadata.published?.slice(0, 10)].filter(Boolean);
-  if (details.length) { const byline = document.createElement("p"); byline.className = "byline"; byline.textContent = details.join(" · "); article.append(byline); }
+  const embeddedTitleIndex = metadata.hideTitle
+    ? passages.findIndex((passage) => passage.type === "heading" && (passage.headingLevel === 1 || passage.text === title))
+    : -1;
+  if (metadata.hideTitle && embeddedTitleIndex < 0) appendArticleMetadata();
   const referenceIndex = associatePdfReferences(passages);
   const visuals = associatePdfVisuals(passages);
   const chatGroups = new Map();
@@ -1953,7 +1993,9 @@ function render(metadata, passages, sourceUrl) {
       }
       message.append(element);
     } else article.append(element);
+    if (index === embeddedTitleIndex) appendArticleMetadata();
   });
+  applyTextHighlights();
   updateArticleOutline();
 }
 
@@ -1980,6 +2022,78 @@ function updateArticleOutline() {
   }
   $("#outlineEmpty").hidden = headings.length > 0;
   $("#outlineMenu").disabled = headings.length === 0;
+}
+
+function domRangeForTextOffsets(element, start, end) {
+  const walker = document.createTreeWalker(element, NodeFilter.SHOW_TEXT);
+  let offset = 0;
+  let startNode = null;
+  let startOffset = 0;
+  let endNode = null;
+  let endOffset = 0;
+  while (walker.nextNode()) {
+    const node = walker.currentNode;
+    const nextOffset = offset + node.data.length;
+    if (!startNode && start >= offset && start <= nextOffset) {
+      startNode = node;
+      startOffset = start - offset;
+    }
+    if (end >= offset && end <= nextOffset) {
+      endNode = node;
+      endOffset = end - offset;
+      break;
+    }
+    offset = nextOffset;
+  }
+  if (!startNode || !endNode) return null;
+  const range = new Range();
+  range.setStart(startNode, startOffset);
+  range.setEnd(endNode, endOffset);
+  return range;
+}
+
+function applyTextHighlights() {
+  if (!globalThis.CSS?.highlights || typeof Highlight !== "function") return;
+  const ranges = state.highlights.flatMap((highlight) => {
+    const passage = document.querySelector(`.passage[data-index="${highlight.passageIndex}"]`);
+    const range = passage ? domRangeForTextOffsets(passage, highlight.start, highlight.end) : null;
+    return range ? [range] : [];
+  });
+  CSS.highlights.set("reader-highlights", new Highlight(...ranges));
+}
+
+function showSelectionHighlight() {
+  const button = $("#selectionHighlight");
+  const selection = window.getSelection();
+  if (!selection || selection.isCollapsed || !selection.toString().trim() || selection.rangeCount !== 1) {
+    button.hidden = true;
+    pendingTextHighlight = null;
+    return;
+  }
+  const range = selection.getRangeAt(0);
+  const startElement = range.startContainer.nodeType === Node.TEXT_NODE ? range.startContainer.parentElement : range.startContainer;
+  const endElement = range.endContainer.nodeType === Node.TEXT_NODE ? range.endContainer.parentElement : range.endContainer;
+  const passage = startElement?.closest?.(".passage");
+  if (!passage || passage !== endElement?.closest?.(".passage") || ["image", "formula", "table"].some((type) => passage.classList.contains(type))) {
+    button.hidden = true;
+    pendingTextHighlight = null;
+    return;
+  }
+  const prefix = new Range();
+  prefix.selectNodeContents(passage);
+  prefix.setEnd(range.startContainer, range.startOffset);
+  const start = prefix.toString().length;
+  const end = start + range.toString().length;
+  const passageIndex = Number(passage.dataset.index);
+  if (!Number.isInteger(passageIndex) || end <= start) return;
+  const overlapping = state.highlights.some((highlight) => highlight.passageIndex === passageIndex
+    && start < highlight.end && end > highlight.start);
+  pendingTextHighlight = { passageIndex, start, end, action: overlapping ? "delete" : "add" };
+  button.textContent = overlapping ? "Delete highlight" : "Highlight";
+  const rect = range.getBoundingClientRect();
+  button.style.left = `${Math.max(8, Math.min(innerWidth - 92, rect.left + rect.width / 2 - 42))}px`;
+  button.style.top = `${Math.min(innerHeight - 44, rect.bottom + 8)}px`;
+  button.hidden = false;
 }
 
 function safePdfFilename(value) {
@@ -2134,8 +2248,10 @@ function withTimeout(promise, milliseconds, message) {
 async function exportCurrentArticle() {
   const button = $("#exportPdf");
   button.disabled = true;
-  const previousLabel = button.textContent;
-  button.textContent = "Preparing PDF…";
+  button.classList.add("is-loading");
+  button.setAttribute("aria-label", "Preparing PDF");
+  button.title = "Preparing PDF…";
+  button.dataset.tooltip = "Preparing PDF…";
   setStatus({ state: "loading", message: "Preparing PDF locally…" });
   const exportRoot = document.createElement("section");
   exportRoot.className = "pdf-export-document";
@@ -2204,12 +2320,15 @@ async function exportCurrentArticle() {
     setStatus({ state: "error", message: `PDF export failed: ${error.message}` });
   } finally {
     exportRoot.remove();
-    button.textContent = previousLabel;
+    button.classList.remove("is-loading");
+    button.setAttribute("aria-label", "Export as PDF");
+    button.title = "Export as PDF";
+    button.dataset.tooltip = "Export as PDF";
     button.disabled = !documentReady;
   }
 }
 
-function markCurrent(index, sentenceIndex = 0, scroll = true) {
+function markCurrent(index, sentenceIndex = 0, scroll = state.autoScroll) {
   document.querySelectorAll(".passage").forEach((element) => {
     const elementIndex = Number(element.dataset.index);
     element.classList.toggle("current", elementIndex === index);
@@ -2220,11 +2339,30 @@ function markCurrent(index, sentenceIndex = 0, scroll = true) {
       sentence.classList.toggle("done", elementIndex < index || (elementIndex === index && currentSentence < sentenceIndex));
     });
   });
-  if (scroll) document.querySelector(`.passage[data-index="${index}"] .sentence[data-sentence="${sentenceIndex}"]`)?.scrollIntoView({ behavior: "smooth", block: "center" });
+  if (scroll) {
+    const passage = document.querySelector(`.passage[data-index="${index}"]`);
+    (passage?.querySelector(`.sentence[data-sentence="${sentenceIndex}"]`) || passage)
+      ?.scrollIntoView({ behavior: "smooth", block: "center" });
+  }
+}
+
+function setPlayButtonPlaying(playing, idleLabel = "Continue reading") {
+  const button = $("#play");
+  const label = playing ? "Pause reading" : idleLabel;
+  button.querySelector(".action-label").textContent = label;
+  button.title = label;
+  button.dataset.tooltip = label;
+  button.setAttribute("aria-pressed", String(playing));
+}
+
+function toggleReading() {
+  if (state.reading || youtubeClockPlaying) stopReading();
+  else void readArticle();
 }
 
 async function readArticle() {
   if (state.reading) return;
+  state.autoScroll = true;
   if (state.index >= state.passages.length) { state.index = 0; state.sentence = 0; }
   if (youtubeIdFromUrl(activeSourceUrl)) {
     const exactStart = state.passages[state.index]?.youtubeSentenceStarts?.[state.sentence];
@@ -2238,20 +2376,21 @@ async function readArticle() {
   }
   state.reading = true;
   const run = ++state.run;
-  $("#play").disabled = true;
+  setPlayButtonPlaying(true);
   $("#stop").disabled = false;
   try {
     while (state.index < state.passages.length && run === state.run) {
       const passage = state.passages[state.index];
-      while (state.sentence < passage.sentences.length && run === state.run) {
-        const sentence = passage.sentences[state.sentence];
+      const spokenSentences = passageSpeechSentences(passage);
+      while (state.sentence < spokenSentences.length && run === state.run) {
+        const sentence = spokenSentences[state.sentence];
         markCurrent(state.index, state.sentence);
-        setStatus({ state: "speaking", message: `Paragraph ${state.index + 1} · sentence ${state.sentence + 1} of ${passage.sentences.length}` });
+        setStatus({ state: "speaking", message: `Paragraph ${state.index + 1} · sentence ${state.sentence + 1} of ${spokenSentences.length}` });
         const spokenText = normalizeTTSTextForEngine(textForSpeech(sentence));
         for (const chunk of chunks(spokenText)) {
           if (run !== state.run) break;
           await activeTts().speak(chunk, {
-            speed: $("#provider").value === "pocket" ? 1 : Number($("#speed").value),
+            speed: 1,
             voice: $("#voice").value,
           });
         }
@@ -2267,8 +2406,7 @@ async function readArticle() {
   } finally {
     if (run === state.run) {
       state.reading = false;
-      $("#play").disabled = false;
-      $("#play span").textContent = state.index ? "Continue reading" : "Read article";
+      setPlayButtonPlaying(false, state.index ? "Continue reading" : "Read article");
       $("#stop").disabled = true;
     }
   }
@@ -2283,7 +2421,6 @@ function readFromPosition(index, sentenceIndex = 0) {
     state.reading = false;
     state.index = index;
     state.sentence = sentenceIndex;
-    inflectTts.stop();
     pocketTts.stop();
     markCurrent(index, sentenceIndex);
     if (Number.isFinite(youtubeStart)) void playYouTubeAt(youtubeStart);
@@ -2292,9 +2429,9 @@ function readFromPosition(index, sentenceIndex = 0) {
   }
   state.run++;
   state.reading = false;
+  state.autoScroll = true;
   state.index = index;
   state.sentence = sentenceIndex;
-  inflectTts.stop();
   pocketTts.stop();
   markCurrent(index, sentenceIndex);
   void readArticle();
@@ -2442,11 +2579,10 @@ window.addEventListener("message", (event) => {
   if (info.playerState === 1) startYouTubeSync();
   else if ([0, 2].includes(info.playerState)) stopYouTubeSync();
   if (info.playerState === 1) {
-    $("#play").disabled = true;
+    setPlayButtonPlaying(true);
     $("#stop").disabled = false;
   } else if ([0, 2].includes(info.playerState)) {
-    $("#play").disabled = false;
-    $("#play span").textContent = info.playerState === 0 ? "Replay video" : "Continue reading";
+    setPlayButtonPlaying(false, info.playerState === 0 ? "Replay video" : "Continue reading");
     $("#stop").disabled = true;
   }
 });
@@ -2478,7 +2614,7 @@ async function playYouTubeAt(milliseconds) {
     updateYouTubeClock(seconds, true);
     syncYouTubeTranscript(seconds);
     startYouTubeSync();
-    $("#play").disabled = true;
+    setPlayButtonPlaying(true);
     $("#stop").disabled = false;
     setStatus({ state: "ready", message: `Playing embedded video from ${formatVideoTime(milliseconds)}` });
   } catch (error) {
@@ -2489,14 +2625,12 @@ async function playYouTubeAt(milliseconds) {
 function stopReading() {
   state.run++;
   state.reading = false;
-  inflectTts.stop();
   pocketTts.stop();
   if (youtubeIdFromUrl(activeSourceUrl)) {
     postToYouTubePlayer({ event: "command", func: "pauseVideo", args: [] });
     stopYouTubeSync();
   }
-  $("#play").disabled = false;
-  $("#play span").textContent = "Continue reading";
+  setPlayButtonPlaying(false);
   $("#stop").disabled = true;
   setStatus({ state: "ready", message: `Paused at paragraph ${state.index + 1}, sentence ${state.sentence + 1}` });
 }
@@ -2541,6 +2675,8 @@ async function loadArticle() {
     }
     state.language = saved.language || "";
     summaryLanguagePromise = null;
+    state.highlights = (saved.passageHighlights || []).filter((highlight) => highlight
+      && Number.isInteger(highlight.passageIndex) && Number.isInteger(highlight.start) && Number.isInteger(highlight.end));
     state.passages = decorateConversationPassages(saved.passages || [], saved.metadata?.site)
       .map((passage) => ({ ...passage, sentences: passageSentences(passage) }));
     if (!state.passages.length) throw new Error("This saved document contains no readable text.");
@@ -2646,39 +2782,22 @@ async function loadArticle() {
   setStatus({ state: "ready", message: `${state.passages.length} passages ready · saved locally` });
 }
 
-function setControlsOpen(open) {
-  const panel = $("#controlsPanel");
-  const menu = $("#controlsMenu");
-  const backdrop = $("#controlsBackdrop");
-  if (open) setOutlineOpen(false, false);
-  document.body.classList.toggle("controls-open", open);
-  menu.setAttribute("aria-expanded", String(open));
-  panel.setAttribute("aria-hidden", String(!open));
-  backdrop.hidden = !open;
-  if (open) $("#closeControls").focus();
-  else if (document.activeElement === $("#closeControls") || panel.contains(document.activeElement)) menu.focus();
-}
-
 function setOutlineOpen(open, restoreFocus = true) {
   const panel = $("#outlinePanel");
   const menu = $("#outlineMenu");
   const backdrop = $("#controlsBackdrop");
-  if (open) setControlsOpen(false);
   document.body.classList.toggle("outline-open", open);
   menu.setAttribute("aria-expanded", String(open));
   panel.setAttribute("aria-hidden", String(!open));
-  backdrop.hidden = !(open || document.body.classList.contains("controls-open"));
+  backdrop.hidden = !open;
   if (open) $("#closeOutline").focus();
   else if (restoreFocus && (document.activeElement === $("#closeOutline") || panel.contains(document.activeElement))) menu.focus();
 }
 
 function closeReaderPanels() {
-  setControlsOpen(false);
   setOutlineOpen(false, false);
 }
 
-$("#controlsMenu").addEventListener("click", () => setControlsOpen(!document.body.classList.contains("controls-open")));
-$("#closeControls").addEventListener("click", () => setControlsOpen(false));
 $("#outlineMenu").addEventListener("click", () => setOutlineOpen(!document.body.classList.contains("outline-open")));
 $("#closeOutline").addEventListener("click", () => setOutlineOpen(false));
 $("#controlsBackdrop").addEventListener("click", closeReaderPanels);
@@ -2693,10 +2812,18 @@ $("#articleOutline").addEventListener("click", (event) => {
   target.scrollIntoView({ behavior: "smooth", block: "start" });
 });
 document.addEventListener("keydown", (event) => {
-  if (event.key === "Escape" && (document.body.classList.contains("controls-open") || document.body.classList.contains("outline-open"))) closeReaderPanels();
+  if (event.key === "Escape" && document.body.classList.contains("outline-open")) closeReaderPanels();
+  if (state.reading
+    && !event.target.closest("input, select, textarea, [contenteditable='true']")
+    && ["ArrowUp", "ArrowDown", "PageUp", "PageDown", "Home", "End", " "].includes(event.key)) state.autoScroll = false;
 });
+window.addEventListener("wheel", () => { if (state.reading) state.autoScroll = false; }, { passive: true });
+window.addEventListener("touchmove", () => { if (state.reading) state.autoScroll = false; }, { passive: true });
+window.addEventListener("pointerdown", (event) => {
+  if (state.reading && event.clientX >= document.documentElement.clientWidth - 20) state.autoScroll = false;
+}, { passive: true });
 
-$("#play").addEventListener("click", readArticle);
+$("#play").addEventListener("click", toggleReading);
 $("#stop").addEventListener("click", stopReading);
 $("#exportPdf").addEventListener("click", () => { void exportCurrentArticle(); });
 $("#exportMarkdown").addEventListener("click", downloadCurrentArticleMarkdown);
@@ -2734,37 +2861,10 @@ $("#summaryProvider").addEventListener("change", () => {
   updateSummaryControls();
   void savePreferences();
 });
-$("#model").addEventListener("change", (event) => {
-  if (state.reading) stopReading();
-  inflectTts.setModel(event.target.value);
-  void savePreferences();
-});
 $("#voice").addEventListener("change", (event) => {
   if (state.reading) stopReading();
   pocketTts.setVoice(event.target.value);
   void savePreferences();
-});
-$("#provider").addEventListener("change", (event) => {
-  if (state.reading) stopReading();
-  else { inflectTts.stop(); pocketTts.stop(); }
-  applyProviderUI();
-  void savePreferences();
-});
-$("#speed").addEventListener("change", () => { void savePreferences(); });
-$("#clearCache").addEventListener("click", async () => {
-  if (state.reading) stopReading();
-  const button = $("#clearCache");
-  button.disabled = true;
-  setStatus({ state: "loading", message: "Clearing cached models and voices…" });
-  try {
-    clearGemmaSummarizer();
-    await Promise.all([inflectTts.clearCache(), pocketTts.clearCache(), caches.delete("transformers-cache")]);
-    setStatus({ state: "ready", message: "All cached models and voices cleared" });
-  } catch (error) {
-    setStatus({ state: "error", message: error.message });
-  } finally {
-    button.disabled = false;
-  }
 });
 $("#article").addEventListener("click", (event) => {
   const selection = window.getSelection();
@@ -2788,6 +2888,27 @@ $("#article").addEventListener("click", (event) => {
   const sentence = event.target.closest(".sentence");
   if (!sentence) return;
   readFromPosition(Number(passage.dataset.index), Number(sentence.dataset.sentence));
+});
+$("#article").addEventListener("mouseup", () => setTimeout(showSelectionHighlight));
+$("#article").addEventListener("keyup", (event) => {
+  if (event.key === "Shift" || event.key.startsWith("Arrow")) setTimeout(showSelectionHighlight);
+});
+$("#selectionHighlight").addEventListener("mousedown", (event) => event.preventDefault());
+$("#selectionHighlight").addEventListener("click", () => {
+  if (!pendingTextHighlight) return;
+  const { passageIndex, start, end, action } = pendingTextHighlight;
+  if (action === "delete") {
+    state.highlights = state.highlights.filter((highlight) => highlight.passageIndex !== passageIndex
+      || start >= highlight.end || end <= highlight.start);
+  } else state.highlights.push({ passageIndex, start, end });
+  applyTextHighlights();
+  if (activeDocumentId) {
+    void updateDocumentPassageHighlights(activeDocumentId, state.highlights)
+      .catch((error) => setStatus({ state: "error", message: `Could not save highlight: ${error.message}` }));
+  }
+  pendingTextHighlight = null;
+  $("#selectionHighlight").hidden = true;
+  window.getSelection()?.removeAllRanges();
 });
 $("#article").addEventListener("mouseover", (event) => {
   const citation = event.target.closest("a.pdf-citation[href^='#pdf-']");
